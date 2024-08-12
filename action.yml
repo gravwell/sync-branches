@@ -1,11 +1,40 @@
-name: 'Your name here'
-description: 'Provide a description here'
-author: 'Your name or organization here'
+name: 'Sync Branches'
+description: 'Opens/Updates pull requests according to source/target branch name patterns.'
+author: 'Gravwell'
 inputs:
-  milliseconds: # change this
+  GITHUB_TOKEN:
     required: true
-    description: 'input description here'
-    default: 'default value if applicable'
+    description: 'Token to use to inspect PRs and create intermediate branches as required.'
+  PR_CREATE_TOKEN:
+    description: |
+      The token used to create PRs. Must be a Personal Access Token (PAT), not `GITHUB_TOKEN`.
+      PRs opened with `GITHUB_TOKEN` will not run Actions: https://github.com/orgs/community/discussions/55906
+      If you want newly-opened PRs to run actions, you'll need to provide a PAT for `PR_CREATE_TOKEN`.
+      A fine-grained PAT will work. It requires Read and Write for PR and Read for Content
+      If `PR_CREATE_TOKEN` is omitted, `GITHUB_TOKEN` will be used to create PRs.
+  use_intermediate_branch:
+    required: true
+    description: |
+      Set to false to open PRs directly from source branches to target branches.
+      
+      Set to true to merge the source and target branches into an intermediate branch, and open a PR from the intermediate branch to the target branch.
+      Intermediate branches are automatically updated whenever the source branch or target branch is updated.
+      Intermediate branches are useful when branch protections require the head (source) branch be up-to-date with the base (target) branch.
+  source_pattern:
+    required: true
+    description: 'The branch (or pattern) to use for the PR source (head).'
+  target_pattern:
+    required: true
+    description: 'The branch (or pattern) to use for the PR target (base).'
+  pr_title:
+    description: 'A mustache-templated string to use to construct the PR title'
+    default: 'chore: Merge {{{ original_source }}} into {{{ target }}}'
+  pr_body:
+    description: 'A mustache-templated string to use to construct the PR body'
+    default: |
+      This PR addresses no issue.
+
+      It proposes merging `{{{ original_source }}}` into `{{{ target }}}`{{#use_intermediate_branch}} via `{{{ source }}}`{{/use_intermediate_branch}}.
 runs:
-  using: 'node16'
+  using: 'node20'
   main: 'dist/index.js'

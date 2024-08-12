@@ -1,105 +1,157 @@
-<p align="center">
-  <a href="https://github.com/actions/typescript-action/actions"><img alt="typescript-action status" src="https://github.com/actions/typescript-action/workflows/build-test/badge.svg"></a>
-</p>
+[![build-test](https://github.com/gravwell/sync-branches/actions/workflows/test.yml/badge.svg)](https://github.com/gravwell/sync-branches/actions/workflows/test.yml)
 
-# Create a JavaScript Action using TypeScript
+# Sync Branches
 
-Use this template to bootstrap the creation of a TypeScript action.:rocket:
+Use this Action to automatically open PRs from a given pattern of source branch to a given target branch.
 
-This template includes compilation support, tests, a validation workflow, publishing, and versioning guidance.  
+**Note**: This action doesn't currently support opening PRs across forks.
 
-If you are new, there's also a simpler introduction.  See the [Hello World JavaScript Action](https://github.com/actions/hello-world-javascript-action)
+## Inputs
 
-## Create an action from this template
+| Field                     | Description                                                    | Required | 
+| ------------------------- | -------------------------------------------------------------- | -------- |
+| `GITHUB_TOKEN`            | Token used to inspect PRs, merge updates, and create intermediate branches as required. Probably `${{ github.token }}` | Yes      |
+| `PR_CREATE_TOKEN`         | The token used to open PRs. Must be a Personal Access Token (PAT), not `GITHUB_TOKEN`. PRs opened with `GITHUB_TOKEN` will not run Actions: https://github.com/orgs/community/discussions/55906 If you want newly-opened PRs to run actions, you'll need to provide a PAT for `PR_CREATE_TOKEN`. A fine-grained PAT will work. It requires Read and Write for PR and Read for Content. If `PR_CREATE_TOKEN` is omitted, `GITHUB_TOKEN` will be used to create PRs. | No      |
+| `use_intermediate_branch` | Set to false to open PRs directly from source branches to target branches. Set to true to merge the source and target branches into an intermediate branch, and open a PR from the intermediate branch to the target branch. Intermediate branches are automatically updated whenever the source branch or target branch is updated. Intermediate branches are useful when branch protections require the head (source) branch be up-to-date with the base (target) branch. | Yes      |
+| `source_pattern`          | The branch (or pattern) to use for the PR source (head). | Yes      |
+| `target_pattern`          | The branch (or pattern) to use for the PR target (base). | Yes      |
+| `pr_title`                | A mustache-templated string to use to construct the PR title   | No       |
+| `pr_body`                 | A mustache-templated string to use to construct the PR body    | No       |
 
-Click the `Use this Template` and provide the new repo details for your action
+### Intermediate Branches
 
-## Code in Main
+You must specify if you want `sync-branches` to use an intermediate branch when opening pull requests.
 
-> First, you'll need to have a reasonably modern version of `node` handy. This won't work with versions older than 9, for instance.
+Depending on branch protection requirements (e.g. "Require branches to be up to date before merging"), you may find it necessary to use an intermediate branch. 
 
-Install the dependencies  
-```bash
-$ npm install
+Let's say you want to merge branch `STABLE` into branch `CURRENT` whenever there's an update to `STABLE`. In that case, your `source_pattern` would be `STABLE` and your `target_pattern` would be `CURRENT`.
+
+#### With an Intermediate Branch
+
+`sync-branches` will create an intermediate branch named `merge/STABLE_to_CURRENT` that has both `STABLE` and `CURRENT` merged to it. It will then open a PR where `merge/STABLE_to_CURRENT` is the head branch, and `CURRENT` is the base branch.
+
+```mermaid
+%%{init: { 'gitGraph': {'mainBranchName': 'STABLE'}} }%%
+gitGraph
+   commit
+   commit
+   branch CURRENT
+   checkout CURRENT
+   commit
+   commit
+   commit
+   commit
+   checkout STABLE
+   commit
+   commit
+   checkout CURRENT
+   branch merge/STABLE_to_CURRENT
+   merge STABLE
 ```
 
-Build the typescript and package it for distribution
-```bash
-$ npm run build && npm run package
+When that PR is merged, your git graph will look something like... 
+
+```mermaid
+%%{init: { 'gitGraph': {'mainBranchName': 'STABLE'}} }%%
+gitGraph
+   commit
+   commit
+   branch CURRENT
+   checkout CURRENT
+   commit
+   commit
+   commit
+   commit
+   checkout STABLE
+   commit
+   commit
+   checkout CURRENT
+   branch merge/STABLE_to_CURRENT
+   merge STABLE
+   checkout CURRENT
+   merge merge/STABLE_to_CURRENT
 ```
 
-Run the tests :heavy_check_mark:  
-```bash
-$ npm test
+#### Without an Intermediate Branch
 
- PASS  ./index.test.js
-  ✓ throws invalid number (3ms)
-  ✓ wait 500 ms (504ms)
-  ✓ test runs (95ms)
+`sync-branches` will open a PR where `STABLE` is the head branch, and `CURRENT` is the base branch.
 
-...
+```mermaid
+%%{init: { 'gitGraph': {'mainBranchName': 'STABLE'}} }%%
+gitGraph
+   commit
+   commit
+   branch CURRENT
+   checkout CURRENT
+   commit
+   commit
+   commit
+   commit
+   checkout STABLE
+   commit
+   commit
 ```
 
-## Change action.yml
+When that PR is merged, your git graph will look something like... 
 
-The action.yml defines the inputs and output for your action.
-
-Update the action.yml with your name, description, inputs and outputs for your action.
-
-See the [documentation](https://help.github.com/en/articles/metadata-syntax-for-github-actions)
-
-## Change the Code
-
-Most toolkit and CI/CD operations involve async operations so the action is run in an async function.
-
-```javascript
-import * as core from '@actions/core';
-...
-
-async function run() {
-  try { 
-      ...
-  } 
-  catch (error) {
-    core.setFailed(error.message);
-  }
-}
-
-run()
+```mermaid
+%%{init: { 'gitGraph': {'mainBranchName': 'STABLE'}} }%%
+gitGraph
+   commit
+   commit
+   branch CURRENT
+   checkout CURRENT
+   commit
+   commit
+   commit
+   commit
+   checkout STABLE
+   commit
+   commit
+   checkout CURRENT
+   merge STABLE
 ```
 
-See the [toolkit documentation](https://github.com/actions/toolkit/blob/master/README.md#packages) for the various packages.
+### Mustache Context
 
-## Publish to a distribution branch
+`pr_title` and `pr_body` can be [mustache templates](https://mustache.github.io/mustache.5.html). 
 
-Actions are run from GitHub repos so we will checkin the packed dist folder. 
+The following items are available in the template view / context.
 
-Then run [ncc](https://github.com/zeit/ncc) and push the results:
-```bash
-$ npm run package
-$ git add dist
-$ git commit -a -m "prod dependencies"
-$ git push origin releases/v1
-```
+	const templateContext = {
+			source_pattern,
+			original_source: originalHead,
+			source: head,
+			target,
+			use_intermediate_branch,
+		};
 
-Note: We recommend using the `--license` option for ncc, which will create a license file for all of the production node modules used in your project.
+| Field                     | Description                                                                 | 
+| ------------------------- | --------------------------------------------------------------------------- | 
+| `source_pattern`          | The `source_pattern` passed as input to `with:`                             | 
+| `original_source`         | The name of the actual source branch - the branch that matches the pattern. |
+| `source`                  | The name of the branch being used as the `head` in the PR.                  | 
+| `target`                  | The `target` passed as input to `with:`                                     | 
+| `use_intermediate_branch` | The `use_intermediate_branch` passed as input to `with:`                    | 
 
-Your action is now published! :rocket: 
-
-See the [versioning documentation](https://github.com/actions/toolkit/blob/master/docs/action-versioning.md)
-
-## Validate
-
-You can now validate the action by referencing `./` in a workflow in your repo (see [test.yml](.github/workflows/test.yml))
+## Example
 
 ```yaml
-uses: ./
-with:
-  milliseconds: 1000
+on: 
+  push:
+    branches:
+      - release/* # You'll want to limit to branches. Pushes to tags don't make sense to this action.
+
+jobs:
+  test-with-intermediate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: gravwell/sync-branches@v1
+        with:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_CREATE_TOKEN: ${{ secrets.MY_PAT }}
+          use_intermediate_branch: true
+          source_pattern: release/*
+          target_pattern: main
 ```
-
-See the [actions tab](https://github.com/actions/typescript-action/actions) for runs of this action! :rocket:
-
-## Usage:
-
-After testing you can [create a v1 tag](https://github.com/actions/toolkit/blob/master/docs/action-versioning.md) to reference the stable and latest V1 action
