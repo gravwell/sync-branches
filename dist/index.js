@@ -316,10 +316,7 @@ async function updateSyncPRs(actionsOctokit) {
         core.debug(`Will open/update sync PRs targeting: ${targets}`);
         for (const targetBranch of targets) {
             try {
-                const update = await handlePushToSourceBranch({ ...ctx, targetBranch });
-                if (update) {
-                    syncedPRs.push(update);
-                }
+                syncedPRs.push(await handlePushToSourceBranch({ ...ctx, targetBranch }));
             }
             catch (err) {
                 if (err instanceof request_error_1.RequestError) {

@@ -164,7 +164,7 @@ const handlePushToSourceBranch = async ({
 }: EventContext & {
 	/** The NAME of the branch (not the full ref) that requires a sync because "originalHead" was pushed to. */
 	targetBranch: string;
-}): Promise<PRUpdate | null> => {
+}): Promise<PRUpdate> => {
 	core.info(`Opening/Updating sync PR: ${originalHead} => ${targetBranch}`);
 
 	const head = useIntermediateBranch
@@ -376,10 +376,7 @@ async function updateSyncPRs(actionsOctokit: Octokit): Promise<void> {
 
 		for (const targetBranch of targets) {
 			try {
-				const update = await handlePushToSourceBranch({ ...ctx, targetBranch });
-				if (update) {
-					syncedPRs.push(update);
-				}
+				syncedPRs.push(await handlePushToSourceBranch({ ...ctx, targetBranch }));
 			} catch (err: unknown) {
 				if (err instanceof RequestError) {
 					core.error(`status: ${err.status}`);
