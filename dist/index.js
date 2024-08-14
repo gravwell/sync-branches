@@ -200,7 +200,13 @@ const handlePushToSourceBranch = async ({ owner, repoName, originalHead, targetB
         else {
             core.debug('Skipping close+reopen.');
         }
-        return;
+        return {
+            baseBranch: existingPR.base.ref,
+            headBranch: existingPR.head.ref,
+            sourceBranch: originalHead,
+            targetBranch,
+            url: existingPR.html_url,
+        };
     }
     const templateContext = {
         source_pattern: sourceBranchPattern,
@@ -213,7 +219,7 @@ const handlePushToSourceBranch = async ({ owner, repoName, originalHead, targetB
     const body = mustache_1.default.render(prBodyTemplate, templateContext);
     // Apparently this NEEDS read&write for PR and at least read for contents... despite what the docs say.
     core.debug('Create new pull request');
-    const pr = await prOctokit.pulls.create({
+    const { data: newPr } = await prOctokit.pulls.create({
         owner,
         repo: repoName,
         title,
@@ -224,15 +230,22 @@ const handlePushToSourceBranch = async ({ owner, repoName, originalHead, targetB
             'X-GitHub-Api-Version': '2022-11-28',
         },
     });
-    core.debug(`Created new pull request: ${JSON.stringify(pr)}`);
-    core.info(`Successfully created PR: ${pr.data.html_url}`);
+    core.debug(`Created new pull request: ${JSON.stringify(newPr)}`);
+    core.info(`Successfully created PR: ${newPr.html_url}`);
+    return {
+        baseBranch: newPr.base.ref,
+        headBranch: newPr.head.ref,
+        sourceBranch: originalHead,
+        targetBranch,
+        url: newPr.html_url,
+    };
 };
 /** Updates a single sync PR when there is a push to the TARGET (base) branch of that PR*/
 const handlePushToTargetBranch = async ({ owner, repoName, originalHead, sourceBranch, useIntermediateBranch, actionsOctokit, prOctokit, }) => {
     if (useIntermediateBranch === false) {
         // Only merge base to head if we're using an intermediate branch.
         core.info(`Update not required for ${sourceBranch} => ${originalHead}`);
-        return;
+        return null;
     }
     core.info(`Update ${sourceBranch} => ${originalHead}`);
     const head = `merge/${sourceBranch.replace(/\//g, '-')}_to_${originalHead.replace(/\//g, '-')}`;
@@ -251,7 +264,7 @@ const handlePushToTargetBranch = async ({ owner, repoName, originalHead, sourceB
     const existingPR = existingPRs[0];
     if (existingPR === undefined) {
         core.info(`A PR from ${head} to ${originalHead} doesn't exist. Skipping update.`);
-        return;
+        return null;
     }
     const pull_number = existingPR.number;
     core.info(`Merging base to head on PR#${pull_number}`);
@@ -264,6 +277,13 @@ const handlePushToTargetBranch = async ({ owner, repoName, originalHead, sourceB
         core.debug('Skipping close+reopen because actionsOctokit is the same as prOctokit');
     }
     core.info(`Successfully updated PR: ${existingPR.html_url}`);
+    return {
+        baseBranch: existingPR.base.ref,
+        headBranch: existingPR.head.ref,
+        sourceBranch,
+        targetBranch: originalHead,
+        url: existingPR.html_url,
+    };
 };
 /** Creates/Updates sync PRs according to provided branch patterns */
 async function updateSyncPRs(actionsOctokit) {
@@ -288,6 +308,7 @@ async function updateSyncPRs(actionsOctokit) {
         sourceBranchPattern: core.getInput('source_pattern', { required: true }),
     };
     const { data: branches } = await actionsOctokit.repos.listBranches({ owner, repo: repoName });
+    const syncedPRs = [];
     // If this action was triggered by a push to a SOURCE branch...
     if ((0, minimatch_1.minimatch)(originalHead, ctx.sourceBranchPattern) === true) {
         core.debug(`Matched source pattern: ${{ originalHead, sourceBranchPattern: ctx.sourceBranchPattern }}`);
@@ -295,7 +316,7 @@ async function updateSyncPRs(actionsOctokit) {
         core.debug(`Will open/update sync PRs targeting: ${targets}`);
         for (const targetBranch of targets) {
             try {
-                await handlePushToSourceBranch({ ...ctx, targetBranch });
+                syncedPRs.push(await handlePushToSourceBranch({ ...ctx, targetBranch }));
             }
             catch (err) {
                 if (err instanceof request_error_1.RequestError) {
@@ -312,7 +333,10 @@ async function updateSyncPRs(actionsOctokit) {
         core.debug(`Will update sync PRs with sources: ${sources}`);
         for (const sourceBranch of sources) {
             try {
-                await handlePushToTargetBranch({ ...ctx, sourceBranch });
+                const update = await handlePushToTargetBranch({ ...ctx, sourceBranch });
+                if (update) {
+                    syncedPRs.push(update);
+                }
             }
             catch (err) {
                 if (err instanceof request_error_1.RequestError) {
@@ -322,6 +346,7 @@ async function updateSyncPRs(actionsOctokit) {
             }
         }
     }
+    core.setOutput('syncedPRs', syncedPRs);
     core.info('Done');
 }
 async function run() {

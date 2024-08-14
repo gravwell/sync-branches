@@ -129,6 +129,22 @@ type EventContext = {
 	prBodyTemplate: string;
 };
 
+/** Describes an updated PR */
+type PRUpdate = {
+	/** The source branch (changes come FROM this branch) */
+	sourceBranch: string;
+	/** The target branch (changes are heading TO this branch) */
+	targetBranch: string;
+
+	/** The head branch of the PR (same as source branch unless using an intermediate branch) */
+	headBranch: string;
+	/** The base branch of the PR (same as target branch) */
+	baseBranch: string;
+
+	/** The URL of the PR's web page */
+	url: string;
+};
+
 /** Creates/Updates a single sync PR when there is a push to the SOURCE (head) branch of that PR */
 const handlePushToSourceBranch = async ({
 	owner,
@@ -148,7 +164,7 @@ const handlePushToSourceBranch = async ({
 }: EventContext & {
 	/** The NAME of the branch (not the full ref) that requires a sync because "originalHead" was pushed to. */
 	targetBranch: string;
-}): Promise<void> => {
+}): Promise<PRUpdate> => {
 	core.info(`Opening/Updating sync PR: ${originalHead} => ${targetBranch}`);
 
 	const head = useIntermediateBranch
@@ -200,7 +216,13 @@ const handlePushToSourceBranch = async ({
 			core.debug('Skipping close+reopen.');
 		}
 
-		return;
+		return {
+			baseBranch: existingPR.base.ref,
+			headBranch: existingPR.head.ref,
+			sourceBranch: originalHead,
+			targetBranch,
+			url: existingPR.html_url,
+		};
 	}
 
 	const templateContext = {
@@ -216,7 +238,7 @@ const handlePushToSourceBranch = async ({
 
 	// Apparently this NEEDS read&write for PR and at least read for contents... despite what the docs say.
 	core.debug('Create new pull request');
-	const pr = await prOctokit.pulls.create({
+	const { data: newPr } = await prOctokit.pulls.create({
 		owner,
 		repo: repoName,
 		title,
@@ -227,9 +249,17 @@ const handlePushToSourceBranch = async ({
 			'X-GitHub-Api-Version': '2022-11-28',
 		},
 	});
-	core.debug(`Created new pull request: ${JSON.stringify(pr)}`);
+	core.debug(`Created new pull request: ${JSON.stringify(newPr)}`);
 
-	core.info(`Successfully created PR: ${pr.data.html_url}`);
+	core.info(`Successfully created PR: ${newPr.html_url}`);
+
+	return {
+		baseBranch: newPr.base.ref,
+		headBranch: newPr.head.ref,
+		sourceBranch: originalHead,
+		targetBranch,
+		url: newPr.html_url,
+	};
 };
 
 /** Updates a single sync PR when there is a push to the TARGET (base) branch of that PR*/
@@ -247,11 +277,11 @@ const handlePushToTargetBranch = async ({
 }: EventContext & {
 	/** The NAME of the branch (not the full ref) that requires a sync because "originalHead" was pushed to. */
 	sourceBranch: string;
-}): Promise<void> => {
+}): Promise<PRUpdate | null> => {
 	if (useIntermediateBranch === false) {
 		// Only merge base to head if we're using an intermediate branch.
 		core.info(`Update not required for ${sourceBranch} => ${originalHead}`);
-		return;
+		return null;
 	}
 	core.info(`Update ${sourceBranch} => ${originalHead}`);
 
@@ -273,7 +303,7 @@ const handlePushToTargetBranch = async ({
 	const existingPR = existingPRs[0];
 	if (existingPR === undefined) {
 		core.info(`A PR from ${head} to ${originalHead} doesn't exist. Skipping update.`);
-		return;
+		return null;
 	}
 
 	const pull_number = existingPR.number;
@@ -289,6 +319,14 @@ const handlePushToTargetBranch = async ({
 	}
 
 	core.info(`Successfully updated PR: ${existingPR.html_url}`);
+
+	return {
+		baseBranch: existingPR.base.ref,
+		headBranch: existingPR.head.ref,
+		sourceBranch,
+		targetBranch: originalHead,
+		url: existingPR.html_url,
+	};
 };
 
 /** Creates/Updates sync PRs according to provided branch patterns */
@@ -328,6 +366,8 @@ async function updateSyncPRs(actionsOctokit: Octokit): Promise<void> {
 
 	const { data: branches } = await actionsOctokit.repos.listBranches({ owner, repo: repoName });
 
+	const syncedPRs: PRUpdate[] = [];
+
 	// If this action was triggered by a push to a SOURCE branch...
 	if (minimatch(originalHead, ctx.sourceBranchPattern) === true) {
 		core.debug(`Matched source pattern: ${{ originalHead, sourceBranchPattern: ctx.sourceBranchPattern }}`);
@@ -336,7 +376,7 @@ async function updateSyncPRs(actionsOctokit: Octokit): Promise<void> {
 
 		for (const targetBranch of targets) {
 			try {
-				await handlePushToSourceBranch({ ...ctx, targetBranch });
+				syncedPRs.push(await handlePushToSourceBranch({ ...ctx, targetBranch }));
 			} catch (err: unknown) {
 				if (err instanceof RequestError) {
 					core.error(`status: ${err.status}`);
@@ -355,7 +395,10 @@ async function updateSyncPRs(actionsOctokit: Octokit): Promise<void> {
 
 		for (const sourceBranch of sources) {
 			try {
-				await handlePushToTargetBranch({ ...ctx, sourceBranch });
+				const update = await handlePushToTargetBranch({ ...ctx, sourceBranch });
+				if (update) {
+					syncedPRs.push(update);
+				}
 			} catch (err: unknown) {
 				if (err instanceof RequestError) {
 					core.error(`status: ${err.status}`);
@@ -365,6 +408,8 @@ async function updateSyncPRs(actionsOctokit: Octokit): Promise<void> {
 			}
 		}
 	}
+
+	core.setOutput('syncedPRs', syncedPRs);
 
 	core.info('Done');
 }

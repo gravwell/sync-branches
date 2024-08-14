@@ -35,6 +35,10 @@ inputs:
       This PR addresses no issue.
 
       It proposes merging `{{{ original_source }}}` into `{{{ target }}}`{{#use_intermediate_branch}} via `{{{ source }}}`{{/use_intermediate_branch}}.
+outputs:
+  syncedPRs:
+    description: |
+      An array of objects describing each updated PR. See README for details.
 runs:
   using: 'node20'
   main: 'dist/index.js'
