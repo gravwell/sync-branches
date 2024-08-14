@@ -65,6 +65,37 @@ const createBranch = async (
 	}
 };
 
+/** Merges "head" into "base" on the given owner/repo.
+ *
+ * Returns true if a merge commit was created, otherwise false
+ */
+const merge = async (
+	okit: Octokit,
+	{ owner, repoName, base, head }: { owner: string; repoName: string; base: string; head: string },
+): Promise<boolean> => {
+	core.debug(`Will attempt to merge ${head} into ${base}`);
+	const { status } = await okit.repos.merge({
+		owner,
+		repo: repoName,
+		base,
+		head,
+	});
+
+	if (status === 201) {
+		// Merge commit created. CI needs kick.
+		core.info(`Merged ${head} into ${base}`);
+		return true;
+	}
+
+	if (status === 204) {
+		core.info(`${head} is already merged to ${base}`);
+		return false;
+	}
+
+	core.error(`Unknown return status (${status}). Assuming we don't need to kick CI.`);
+	return false;
+};
+
 /**
  * Closes, pauses, then reopens a given PR.
  *
@@ -73,30 +104,27 @@ const createBranch = async (
  *
  * As long as the close+reopen requests come from a PAT and not GITHUB_TOKEN, then Workflows should run.
  */
-const closeThenReOpen = async (
-	okit: Octokit,
-	pr: { owner: string; repo: string; pull_number: number },
-): Promise<void> => {
-	core.debug('Closing');
+const kickCI = async (okit: Octokit, pr: { owner: string; repo: string; pull_number: number }): Promise<void> => {
+	core.debug(`Closing ${pr.pull_number}`);
 	await okit.pulls.update({
 		owner: pr.owner,
 		repo: pr.repo,
 		pull_number: pr.pull_number,
 		state: 'closed',
 	});
-	core.debug('Closed');
+	core.debug(`Closed ${pr.pull_number}`);
 
 	// Give GitHub a moment
 	await new Promise(resolve => setTimeout(resolve, 5_000));
 
-	core.debug('Opening');
+	core.debug(`Reopening ${pr.pull_number}`);
 	await okit.pulls.update({
 		owner: pr.owner,
 		repo: pr.repo,
 		pull_number: pr.pull_number,
 		state: 'open',
 	});
-	core.debug('Open');
+	core.debug(`Reopened ${pr.pull_number}`);
 };
 
 type EventContext = {
@@ -171,6 +199,9 @@ const handlePushToSourceBranch = async ({
 		? `merge/${originalHead.replace(/\//g, '-')}_to_${targetBranch.replace(/\//g, '-')}`
 		: originalHead;
 
+	// true if we need to close+reopen the PR to start CI, otherwise false
+	let needsKick = false;
+
 	if (useIntermediateBranch) {
 		// Try to fetch the target branch
 		const {
@@ -182,9 +213,12 @@ const handlePushToSourceBranch = async ({
 
 		// merge the source branch (head) into the intermediate branch
 		try {
-			core.debug(`Will attempt to merge ${originalHead} into ${head}`);
-			await actionsOctokit.repos.merge({ owner, repo: repoName, base: head, head: originalHead });
-			core.info(`Merged ${originalHead} into ${head}`);
+			needsKick = await merge(actionsOctokit, {
+				owner,
+				repoName,
+				base: head,
+				head: originalHead,
+			});
 		} catch {
 			throw new Error(`Failed to merge ${originalHead} into ${head}. Maybe delete ${head}?`);
 		}
@@ -209,9 +243,8 @@ const handlePushToSourceBranch = async ({
 	if (existingPR !== undefined) {
 		core.info(`A PR from ${ownerHead} to ${targetBranch} already exists.`);
 
-		if (useIntermediateBranch && prOctokit !== actionsOctokit) {
-			core.info('Closing then re-opening the PR to trigger CI...');
-			await closeThenReOpen(prOctokit, { owner, repo: repoName, pull_number: existingPR.number });
+		if (needsKick && prOctokit !== actionsOctokit) {
+			await kickCI(prOctokit, { owner, repo: repoName, pull_number: existingPR.number });
 		} else {
 			core.debug('Skipping close+reopen.');
 		}
@@ -306,16 +339,24 @@ const handlePushToTargetBranch = async ({
 		return null;
 	}
 
-	const pull_number = existingPR.number;
+	// true if we need to close+reopen the PR to start CI, otherwise false
+	let needsKick = false;
 
-	core.info(`Merging base to head on PR#${pull_number}`);
-	await actionsOctokit.pulls.updateBranch({ owner, repo: repoName, pull_number });
+	try {
+		needsKick = await merge(actionsOctokit, {
+			owner,
+			repoName,
+			base: head,
+			head: originalHead,
+		});
+	} catch {
+		throw new Error(`Failed to merge ${originalHead} into ${head}. Maybe delete ${head}?`);
+	}
 
-	if (prOctokit !== actionsOctokit) {
-		core.info('Closing then re-opening the PR to trigger CI...');
-		await closeThenReOpen(prOctokit, { owner, repo: repoName, pull_number });
+	if (needsKick && prOctokit !== actionsOctokit) {
+		await kickCI(prOctokit, { owner, repo: repoName, pull_number: existingPR.number });
 	} else {
-		core.debug('Skipping close+reopen because actionsOctokit is the same as prOctokit');
+		core.debug('Skipping close+reopen.');
 	}
 
 	core.info(`Successfully updated PR: ${existingPR.html_url}`);
