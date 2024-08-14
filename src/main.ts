@@ -69,6 +69,8 @@ const createBranch = async (
  *
  * Returns true if a merge commit was created, otherwise false
  *
+ * If the merge **fails** for any reason (permission trouble, merge conflict), then this function will throw.
+ *
  * Status code reference: https://docs.github.com/en/rest/branches/branches?apiVersion=2022-11-28#merge-a-branch--status-codes
  */
 const merge = async (
@@ -93,6 +95,7 @@ const merge = async (
 		return false;
 	}
 
+	// Unless we receive an undocumented 2xx return code, this code is unreachable.
 	core.error(`Unknown return status (${status}). Assuming we don't need to kick CI.`);
 	return false;
 };
