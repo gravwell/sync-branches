@@ -196,7 +196,7 @@ const handlePushToSourceBranch = async ({
 }: EventContext & {
 	/** The NAME of the branch (not the full ref) that requires a sync because "pushedBranch" was pushed to. */
 	targetBranch: string;
-}): Promise<PRUpdate> => {
+}): Promise<PRUpdate | null> => {
 	core.info(`Opening/Updating sync PR: ${pushedBranch} => ${targetBranch}`);
 
 	const head = useIntermediateBranch
@@ -249,17 +249,17 @@ const handlePushToSourceBranch = async ({
 
 		if (needsKick && prOctokit !== actionsOctokit) {
 			await kickCI(prOctokit, { owner, repo: repoName, pull_number: existingPR.number });
-		} else {
-			core.debug('Skipping close+reopen.');
+			core.info(`Successfully updated PR: ${existingPR.html_url}`);
+			return {
+				baseBranch: existingPR.base.ref,
+				headBranch: existingPR.head.ref,
+				sourceBranch: pushedBranch,
+				targetBranch,
+				url: existingPR.html_url,
+			};
 		}
-
-		return {
-			baseBranch: existingPR.base.ref,
-			headBranch: existingPR.head.ref,
-			sourceBranch: pushedBranch,
-			targetBranch,
-			url: existingPR.html_url,
-		};
+		core.debug('Skipping close+reopen.');
+		return null; // PR existed, didn't update it, didn't kick it, didn't change it
 	}
 
 	const templateContext = {
@@ -359,19 +359,18 @@ const handlePushToTargetBranch = async ({
 
 	if (needsKick && prOctokit !== actionsOctokit) {
 		await kickCI(prOctokit, { owner, repo: repoName, pull_number: existingPR.number });
-	} else {
-		core.debug('Skipping close+reopen.');
+		core.info(`Successfully updated PR: ${existingPR.html_url}`);
+
+		return {
+			baseBranch: existingPR.base.ref,
+			headBranch: existingPR.head.ref,
+			sourceBranch,
+			targetBranch: pushedBranch,
+			url: existingPR.html_url,
+		};
 	}
-
-	core.info(`Successfully updated PR: ${existingPR.html_url}`);
-
-	return {
-		baseBranch: existingPR.base.ref,
-		headBranch: existingPR.head.ref,
-		sourceBranch,
-		targetBranch: pushedBranch,
-		url: existingPR.html_url,
-	};
+	core.debug('Skipping close+reopen.');
+	return null; // PR existed, didn't update it, didn't kick it, didn't change it
 };
 
 /** Creates/Updates sync PRs according to provided branch patterns */
@@ -421,7 +420,10 @@ async function updateSyncPRs(actionsOctokit: Octokit): Promise<void> {
 
 		for (const targetBranch of targets) {
 			try {
-				syncedPRs.push(await handlePushToSourceBranch({ ...ctx, targetBranch }));
+				const update = await handlePushToSourceBranch({ ...ctx, targetBranch });
+				if (update) {
+					syncedPRs.push(update);
+				}
 			} catch (err: unknown) {
 				if (err instanceof RequestError) {
 					core.error(`status: ${err.status}`);

@@ -228,17 +228,17 @@ const handlePushToSourceBranch = async ({ owner, repoName, pushedBranch, targetB
         core.info(`A PR from ${ownerHead} to ${targetBranch} already exists.`);
         if (needsKick && prOctokit !== actionsOctokit) {
             await kickCI(prOctokit, { owner, repo: repoName, pull_number: existingPR.number });
+            core.info(`Successfully updated PR: ${existingPR.html_url}`);
+            return {
+                baseBranch: existingPR.base.ref,
+                headBranch: existingPR.head.ref,
+                sourceBranch: pushedBranch,
+                targetBranch,
+                url: existingPR.html_url,
+            };
         }
-        else {
-            core.debug('Skipping close+reopen.');
-        }
-        return {
-            baseBranch: existingPR.base.ref,
-            headBranch: existingPR.head.ref,
-            sourceBranch: pushedBranch,
-            targetBranch,
-            url: existingPR.html_url,
-        };
+        core.debug('Skipping close+reopen.');
+        return null; // PR existed, didn't update it, didn't kick it, didn't change it
     }
     const templateContext = {
         source_pattern: sourceBranchPattern,
@@ -313,18 +313,17 @@ const handlePushToTargetBranch = async ({ owner, repoName, pushedBranch, sourceB
     }
     if (needsKick && prOctokit !== actionsOctokit) {
         await kickCI(prOctokit, { owner, repo: repoName, pull_number: existingPR.number });
+        core.info(`Successfully updated PR: ${existingPR.html_url}`);
+        return {
+            baseBranch: existingPR.base.ref,
+            headBranch: existingPR.head.ref,
+            sourceBranch,
+            targetBranch: pushedBranch,
+            url: existingPR.html_url,
+        };
     }
-    else {
-        core.debug('Skipping close+reopen.');
-    }
-    core.info(`Successfully updated PR: ${existingPR.html_url}`);
-    return {
-        baseBranch: existingPR.base.ref,
-        headBranch: existingPR.head.ref,
-        sourceBranch,
-        targetBranch: pushedBranch,
-        url: existingPR.html_url,
-    };
+    core.debug('Skipping close+reopen.');
+    return null; // PR existed, didn't update it, didn't kick it, didn't change it
 };
 /** Creates/Updates sync PRs according to provided branch patterns */
 async function updateSyncPRs(actionsOctokit) {
@@ -357,7 +356,10 @@ async function updateSyncPRs(actionsOctokit) {
         core.debug(`Will open/update sync PRs targeting: ${targets}`);
         for (const targetBranch of targets) {
             try {
-                syncedPRs.push(await handlePushToSourceBranch({ ...ctx, targetBranch }));
+                const update = await handlePushToSourceBranch({ ...ctx, targetBranch });
+                if (update) {
+                    syncedPRs.push(update);
+                }
             }
             catch (err) {
                 if (err instanceof request_error_1.RequestError) {
