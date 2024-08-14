@@ -127,6 +127,34 @@ const createBranch = async (okit, { owner, repo, branch, sha }) => {
         }
     }
 };
+/** Merges "head" into "base" on the given owner/repo.
+ *
+ * Returns true if a merge commit was created, otherwise false
+ *
+ * If the merge **fails** for any reason (permission trouble, merge conflict), then this function will throw.
+ *
+ * Status code reference: https://docs.github.com/en/rest/branches/branches?apiVersion=2022-11-28#merge-a-branch--status-codes
+ */
+const merge = async (okit, { owner, repoName, base, head }) => {
+    core.debug(`Will attempt to merge ${head} into ${base}`);
+    const { status } = await okit.repos.merge({
+        owner,
+        repo: repoName,
+        base,
+        head,
+    });
+    if (status === 201) {
+        core.info(`Merged ${head} into ${base}`);
+        return true;
+    }
+    if (status === 204) {
+        core.info(`${head} is already merged to ${base}`);
+        return false;
+    }
+    // Unless we receive an undocumented 2xx return code, this code is unreachable.
+    core.error(`Unknown return status (${status}). Assuming we don't need to kick CI.`);
+    return false;
+};
 /**
  * Closes, pauses, then reopens a given PR.
  *
@@ -135,32 +163,34 @@ const createBranch = async (okit, { owner, repo, branch, sha }) => {
  *
  * As long as the close+reopen requests come from a PAT and not GITHUB_TOKEN, then Workflows should run.
  */
-const closeThenReOpen = async (okit, pr) => {
-    core.debug('Closing');
+const kickCI = async (okit, pr) => {
+    core.debug(`Closing ${pr.pull_number}`);
     await okit.pulls.update({
         owner: pr.owner,
         repo: pr.repo,
         pull_number: pr.pull_number,
         state: 'closed',
     });
-    core.debug('Closed');
+    core.debug(`Closed ${pr.pull_number}`);
     // Give GitHub a moment
     await new Promise(resolve => setTimeout(resolve, 5000));
-    core.debug('Opening');
+    core.debug(`Reopening ${pr.pull_number}`);
     await okit.pulls.update({
         owner: pr.owner,
         repo: pr.repo,
         pull_number: pr.pull_number,
         state: 'open',
     });
-    core.debug('Open');
+    core.debug(`Reopened ${pr.pull_number}`);
 };
 /** Creates/Updates a single sync PR when there is a push to the SOURCE (head) branch of that PR */
-const handlePushToSourceBranch = async ({ owner, repoName, originalHead, targetBranch, useIntermediateBranch, actionsOctokit, prOctokit, prTitleTemplate, prBodyTemplate, sourceBranchPattern, }) => {
-    core.info(`Opening/Updating sync PR: ${originalHead} => ${targetBranch}`);
+const handlePushToSourceBranch = async ({ owner, repoName, pushedBranch, targetBranch, useIntermediateBranch, actionsOctokit, prOctokit, prTitleTemplate, prBodyTemplate, sourceBranchPattern, }) => {
+    core.info(`Opening/Updating sync PR: ${pushedBranch} => ${targetBranch}`);
     const head = useIntermediateBranch
-        ? `merge/${originalHead.replace(/\//g, '-')}_to_${targetBranch.replace(/\//g, '-')}`
-        : originalHead;
+        ? `merge/${pushedBranch.replace(/\//g, '-')}_to_${targetBranch.replace(/\//g, '-')}`
+        : pushedBranch;
+    // true if we need to close+reopen the PR to start CI, otherwise false
+    let needsKick = false;
     if (useIntermediateBranch) {
         // Try to fetch the target branch
         const { commit: { sha: baseCommit }, } = await getBranch(actionsOctokit, { owner, repo: repoName, branch: targetBranch });
@@ -168,12 +198,15 @@ const handlePushToSourceBranch = async ({ owner, repoName, originalHead, targetB
         await createBranch(actionsOctokit, { owner, repo: repoName, branch: head, sha: baseCommit });
         // merge the source branch (head) into the intermediate branch
         try {
-            core.debug(`Will attempt to merge ${originalHead} into ${head}`);
-            await actionsOctokit.repos.merge({ owner, repo: repoName, base: head, head: originalHead });
-            core.info(`Merged ${originalHead} into ${head}`);
+            needsKick = await merge(actionsOctokit, {
+                owner,
+                repoName,
+                base: head,
+                head: pushedBranch,
+            });
         }
         catch (_a) {
-            throw new Error(`Failed to merge ${originalHead} into ${head}. Maybe delete ${head}?`);
+            throw new Error(`Failed to merge ${pushedBranch} into ${head}. Maybe delete ${head}?`);
         }
     }
     // List existing pulls from the given source to the desired target branch
@@ -193,24 +226,23 @@ const handlePushToSourceBranch = async ({ owner, repoName, originalHead, targetB
     const existingPR = existingPRs[0];
     if (existingPR !== undefined) {
         core.info(`A PR from ${ownerHead} to ${targetBranch} already exists.`);
-        if (useIntermediateBranch && prOctokit !== actionsOctokit) {
-            core.info('Closing then re-opening the PR to trigger CI...');
-            await closeThenReOpen(prOctokit, { owner, repo: repoName, pull_number: existingPR.number });
+        if (needsKick && prOctokit !== actionsOctokit) {
+            await kickCI(prOctokit, { owner, repo: repoName, pull_number: existingPR.number });
+            core.info(`Successfully updated PR: ${existingPR.html_url}`);
+            return {
+                baseBranch: existingPR.base.ref,
+                headBranch: existingPR.head.ref,
+                sourceBranch: pushedBranch,
+                targetBranch,
+                url: existingPR.html_url,
+            };
         }
-        else {
-            core.debug('Skipping close+reopen.');
-        }
-        return {
-            baseBranch: existingPR.base.ref,
-            headBranch: existingPR.head.ref,
-            sourceBranch: originalHead,
-            targetBranch,
-            url: existingPR.html_url,
-        };
+        core.debug('Skipping close+reopen.');
+        return null; // PR existed, didn't update it, didn't kick it, didn't change it
     }
     const templateContext = {
         source_pattern: sourceBranchPattern,
-        original_source: originalHead,
+        original_source: pushedBranch,
         source: head,
         target: targetBranch,
         use_intermediate_branch: useIntermediateBranch,
@@ -235,61 +267,69 @@ const handlePushToSourceBranch = async ({ owner, repoName, originalHead, targetB
     return {
         baseBranch: newPr.base.ref,
         headBranch: newPr.head.ref,
-        sourceBranch: originalHead,
+        sourceBranch: pushedBranch,
         targetBranch,
         url: newPr.html_url,
     };
 };
 /** Updates a single sync PR when there is a push to the TARGET (base) branch of that PR*/
-const handlePushToTargetBranch = async ({ owner, repoName, originalHead, sourceBranch, useIntermediateBranch, actionsOctokit, prOctokit, }) => {
+const handlePushToTargetBranch = async ({ owner, repoName, pushedBranch, sourceBranch, useIntermediateBranch, actionsOctokit, prOctokit, }) => {
     if (useIntermediateBranch === false) {
         // Only merge base to head if we're using an intermediate branch.
-        core.info(`Update not required for ${sourceBranch} => ${originalHead}`);
+        core.info(`Update not required for ${sourceBranch} => ${pushedBranch}`);
         return null;
     }
-    core.info(`Update ${sourceBranch} => ${originalHead}`);
-    const head = `merge/${sourceBranch.replace(/\//g, '-')}_to_${originalHead.replace(/\//g, '-')}`;
+    core.info(`Update ${sourceBranch} => ${pushedBranch}`);
+    const head = `merge/${sourceBranch.replace(/\//g, '-')}_to_${pushedBranch.replace(/\//g, '-')}`;
     // List existing pulls from the given source to the desired target branch
     const { data: pulls } = await actionsOctokit.pulls.list({
         owner,
         repo: repoName,
-        base: originalHead,
+        base: pushedBranch,
         head,
         state: 'open',
     });
-    const existingPRs = pulls.filter(p => p.head.ref === head && p.base.ref === originalHead);
+    const existingPRs = pulls.filter(p => p.head.ref === head && p.base.ref === pushedBranch);
     if (existingPRs.length > 1) {
-        core.error(`Found multiple PRs from ${head} to ${originalHead}. That's impossible.`);
+        core.error(`Found multiple PRs from ${head} to ${pushedBranch}. That's impossible.`);
     }
     const existingPR = existingPRs[0];
     if (existingPR === undefined) {
-        core.info(`A PR from ${head} to ${originalHead} doesn't exist. Skipping update.`);
+        core.info(`A PR from ${head} to ${pushedBranch} doesn't exist. Skipping update.`);
         return null;
     }
-    const pull_number = existingPR.number;
-    core.info(`Merging base to head on PR#${pull_number}`);
-    await actionsOctokit.pulls.updateBranch({ owner, repo: repoName, pull_number });
-    if (prOctokit !== actionsOctokit) {
-        core.info('Closing then re-opening the PR to trigger CI...');
-        await closeThenReOpen(prOctokit, { owner, repo: repoName, pull_number });
+    // true if we need to close+reopen the PR to start CI, otherwise false
+    let needsKick = false;
+    try {
+        needsKick = await merge(actionsOctokit, {
+            owner,
+            repoName,
+            base: head,
+            head: pushedBranch,
+        });
     }
-    else {
-        core.debug('Skipping close+reopen because actionsOctokit is the same as prOctokit');
+    catch (_a) {
+        throw new Error(`Failed to merge ${pushedBranch} into ${head}. Maybe delete ${head}?`);
     }
-    core.info(`Successfully updated PR: ${existingPR.html_url}`);
-    return {
-        baseBranch: existingPR.base.ref,
-        headBranch: existingPR.head.ref,
-        sourceBranch,
-        targetBranch: originalHead,
-        url: existingPR.html_url,
-    };
+    if (needsKick && prOctokit !== actionsOctokit) {
+        await kickCI(prOctokit, { owner, repo: repoName, pull_number: existingPR.number });
+        core.info(`Successfully updated PR: ${existingPR.html_url}`);
+        return {
+            baseBranch: existingPR.base.ref,
+            headBranch: existingPR.head.ref,
+            sourceBranch,
+            targetBranch: pushedBranch,
+            url: existingPR.html_url,
+        };
+    }
+    core.debug('Skipping close+reopen.');
+    return null; // PR existed, didn't update it, didn't kick it, didn't change it
 };
 /** Creates/Updates sync PRs according to provided branch patterns */
 async function updateSyncPRs(actionsOctokit) {
     const { ref, repository: { name: repoName, owner: { login: owner }, }, } = await (0, github_events_1.checkPushEventEnv)();
-    const originalHead = refAsBranch(ref);
-    if ((0, lodash_1.isNil)(originalHead)) {
+    const pushedBranch = refAsBranch(ref);
+    if ((0, lodash_1.isNil)(pushedBranch)) {
         throw new Error(`Unable to determine head branch. ref was ${ref}. Did you forget to limit the workflow to only branches?`);
     }
     const prToken = core.getInput('PR_CREATE_TOKEN');
@@ -298,7 +338,7 @@ async function updateSyncPRs(actionsOctokit) {
     const ctx = {
         owner,
         repoName,
-        originalHead,
+        pushedBranch,
         targetBranchPattern: core.getInput('target_pattern', { required: true }),
         useIntermediateBranch: core.getBooleanInput('use_intermediate_branch', { required: true }),
         actionsOctokit,
@@ -310,13 +350,16 @@ async function updateSyncPRs(actionsOctokit) {
     const { data: branches } = await actionsOctokit.repos.listBranches({ owner, repo: repoName });
     const syncedPRs = [];
     // If this action was triggered by a push to a SOURCE branch...
-    if ((0, minimatch_1.minimatch)(originalHead, ctx.sourceBranchPattern) === true) {
-        core.debug(`Matched source pattern: ${{ originalHead, sourceBranchPattern: ctx.sourceBranchPattern }}`);
+    if ((0, minimatch_1.minimatch)(pushedBranch, ctx.sourceBranchPattern) === true) {
+        core.debug(`Matched source pattern: ${{ pushedBranch, sourceBranchPattern: ctx.sourceBranchPattern }}`);
         const targets = branches.map(b => b.name).filter(b => (0, minimatch_1.minimatch)(b, ctx.targetBranchPattern));
         core.debug(`Will open/update sync PRs targeting: ${targets}`);
         for (const targetBranch of targets) {
             try {
-                syncedPRs.push(await handlePushToSourceBranch({ ...ctx, targetBranch }));
+                const update = await handlePushToSourceBranch({ ...ctx, targetBranch });
+                if (update) {
+                    syncedPRs.push(update);
+                }
             }
             catch (err) {
                 if (err instanceof request_error_1.RequestError) {
@@ -327,8 +370,8 @@ async function updateSyncPRs(actionsOctokit) {
         }
     }
     // If this action was triggered by a push to a TARGET branch...
-    if ((0, minimatch_1.minimatch)(originalHead, ctx.targetBranchPattern) === true) {
-        core.debug(`Matched target pattern: ${{ originalHead, targetBranchPattern: ctx.targetBranchPattern }}`);
+    if ((0, minimatch_1.minimatch)(pushedBranch, ctx.targetBranchPattern) === true) {
+        core.debug(`Matched target pattern: ${{ pushedBranch, targetBranchPattern: ctx.targetBranchPattern }}`);
         const sources = branches.map(b => b.name).filter(b => (0, minimatch_1.minimatch)(b, ctx.sourceBranchPattern));
         core.debug(`Will update sync PRs with sources: ${sources}`);
         for (const sourceBranch of sources) {
