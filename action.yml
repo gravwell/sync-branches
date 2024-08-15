@@ -16,7 +16,7 @@ inputs:
     required: true
     description: |
       Set to false to open PRs directly from source branches to target branches.
-      
+
       Set to true to merge the source and target branches into an intermediate branch, and open a PR from the intermediate branch to the target branch.
       Intermediate branches are automatically updated whenever the source branch or target branch is updated.
       Intermediate branches are useful when branch protections require the head (source) branch be up-to-date with the base (target) branch.
@@ -35,6 +35,12 @@ inputs:
       This PR addresses no issue.
 
       It proposes merging `{{{ original_source }}}` into `{{{ target }}}`{{#use_intermediate_branch}} via `{{{ source }}}`{{/use_intermediate_branch}}.
+  source_conflict_label:
+    description: |
+      A label to apply when a conflict is detected between the source branch and intermediate branch. Not relevant if there's no intermediate branch. If omitted, then no labels will be applied
+  target_conflict_label:
+    description: |
+      A label to apply when a conflict is detected between the intermediate branch and the target branch. If not using an intermediate branch, this label will be applied if there is a conflict between the source branch and target branch. If omitted, then no labels will be applied.
 outputs:
   syncedPRs:
     description: |
