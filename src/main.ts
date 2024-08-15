@@ -108,7 +108,8 @@ const merge = async (
  */
 const comment = async (
 	{ owner, repo, actionsOctokit }: EventContext,
-	{ pull_number, notes }: { pull_number: number; notes: string[] },
+	{ number: pull_number }: { number: number },
+	{ notes }: { notes: string[] },
 ): Promise<void> => {
 	if (notes.length === 0) {
 		core.debug('Skip commenting. Nothing to do.');
@@ -147,16 +148,22 @@ const comment = async (
  */
 const applyLabel = async (
 	{ owner, repo, actionsOctokit }: EventContext,
-	{ pull_number, label }: { pull_number: number; label: string },
+	{ number: pull_number, labels }: { number: number; labels: { name: string }[] },
+	{ label }: { label: string },
 ): Promise<void> => {
 	if (label === '') {
 		core.debug('Empty label. Skipping application');
 		return;
 	}
 
+	if (labels.map(l => l.name).includes(label) === true) {
+		core.debug(`Already have label "${label}". Skipping application`);
+		return;
+	}
+
 	try {
 		core.debug(`Applying label: ${label}`);
-		await actionsOctokit.issues.addLabels({ owner, repo, issue_number: pull_number, labels: [{ name: label }] });
+		await actionsOctokit.issues.addLabels({ owner, repo, issue_number: pull_number, labels: [label] });
 		core.debug(`Applied label: ${label}`);
 	} catch (err) {
 		core.warning(`Failed to apply label`);
@@ -175,10 +182,16 @@ const applyLabel = async (
  */
 const removeLabel = async (
 	{ owner, repo, actionsOctokit }: EventContext,
-	{ pull_number, label }: { pull_number: number; label: string },
+	{ number: pull_number, labels }: { number: number; labels: { name: string }[] },
+	{ label }: { label: string },
 ): Promise<void> => {
 	if (label === '') {
 		core.debug('Empty label. Skipping removal');
+		return;
+	}
+
+	if (labels.map(l => l.name).includes(label) === false) {
+		core.debug(`Already missing label "${label}". Skipping removal`);
 		return;
 	}
 
@@ -210,14 +223,13 @@ type ConflictSummary = {
  */
 const reportConflicts = async (
 	ctx: EventContext,
+	pr: { number: number; labels: { name: string }[] },
 	{
-		pull_number,
 		sourceBranch,
 		targetBranch,
 		intermediateBranch,
 		conflicts,
 	}: {
-		pull_number: number;
 		sourceBranch: string;
 		targetBranch: string;
 		intermediateBranch: string;
@@ -230,27 +242,27 @@ const reportConflicts = async (
 		notes.push(
 			`Failed to merge \`${sourceBranch}\` into \`${intermediateBranch}\`. Possibly a conflict? It may help to delete branch \`${intermediateBranch}\` and re-run your \`sync-branches\` job in order to start fresh.`,
 		);
-		applyLabel(ctx, { pull_number, label: ctx.sourceConflictLabel });
+		applyLabel(ctx, pr, { label: ctx.sourceConflictLabel });
 	} else {
 		core.debug(`Encountered no ${sourceBranch} => ${intermediateBranch} conflict`);
-		removeLabel(ctx, { pull_number, label: ctx.sourceConflictLabel });
+		removeLabel(ctx, pr, { label: ctx.sourceConflictLabel });
 	}
 
 	if (conflicts.targetConflict) {
 		notes.push(
 			`Failed to merge \`${targetBranch}\` into \`${intermediateBranch}\`. Possibly a conflict? Check the status of this PR below.`,
 		);
-		applyLabel(ctx, { pull_number, label: ctx.targetConflictLabel });
+		applyLabel(ctx, pr, { label: ctx.targetConflictLabel });
 	} else {
 		core.debug(`Encountered no ${targetBranch} => ${intermediateBranch} conflict`);
-		removeLabel(ctx, { pull_number, label: ctx.targetConflictLabel });
+		removeLabel(ctx, pr, { label: ctx.targetConflictLabel });
 	}
 
 	for (const note of notes) {
 		core.warning(note);
 	}
 
-	await comment(ctx, { pull_number, notes });
+	await comment(ctx, pr, { notes });
 };
 
 /**
@@ -410,8 +422,7 @@ const handlePushToSourceBranch = async (
 	if (existingPR !== undefined) {
 		core.info(`A PR from ${head} to ${targetBranch} already exists.`);
 
-		await reportConflicts(ctx, {
-			pull_number: existingPR.number,
+		await reportConflicts(ctx, existingPR, {
 			sourceBranch: pushedBranch,
 			intermediateBranch: head,
 			targetBranch,
@@ -459,8 +470,7 @@ const handlePushToSourceBranch = async (
 
 	core.info(`Successfully created PR: ${newPr.html_url}`);
 
-	await reportConflicts(ctx, {
-		pull_number: newPr.number,
+	await reportConflicts(ctx, newPr, {
 		sourceBranch: pushedBranch,
 		intermediateBranch: head,
 		targetBranch,
@@ -525,8 +535,7 @@ const handlePushToTargetBranch = async (
 		conflicts.targetConflict = true;
 	}
 
-	await reportConflicts(ctx, {
-		pull_number: existingPR.number,
+	await reportConflicts(ctx, existingPR, {
 		sourceBranch,
 		intermediateBranch: head,
 		targetBranch: pushedBranch,

@@ -161,7 +161,7 @@ const merge = async ({ owner, repo, actionsOctokit }, { base, head }) => {
  *
  * If the comment fails to post, this fn won't throw. It only logs.
  */
-const comment = async ({ owner, repo, actionsOctokit }, { pull_number, notes }) => {
+const comment = async ({ owner, repo, actionsOctokit }, { number: pull_number }, { notes }) => {
     if (notes.length === 0) {
         core.debug('Skip commenting. Nothing to do.');
         return;
@@ -195,14 +195,18 @@ const comment = async ({ owner, repo, actionsOctokit }, { pull_number, notes }) 
  *
  * If the label fails to apply, this fn won't throw. It only logs.
  */
-const applyLabel = async ({ owner, repo, actionsOctokit }, { pull_number, label }) => {
+const applyLabel = async ({ owner, repo, actionsOctokit }, { number: pull_number, labels }, { label }) => {
     if (label === '') {
         core.debug('Empty label. Skipping application');
         return;
     }
+    if (labels.map(l => l.name).includes(label) === true) {
+        core.debug(`Already have label "${label}". Skipping application`);
+        return;
+    }
     try {
         core.debug(`Applying label: ${label}`);
-        await actionsOctokit.issues.addLabels({ owner, repo, issue_number: pull_number, labels: [{ name: label }] });
+        await actionsOctokit.issues.addLabels({ owner, repo, issue_number: pull_number, labels: [label] });
         core.debug(`Applied label: ${label}`);
     }
     catch (err) {
@@ -220,9 +224,13 @@ const applyLabel = async ({ owner, repo, actionsOctokit }, { pull_number, label 
  *
  * If the label fails to remove, this fn won't throw. It only logs.
  */
-const removeLabel = async ({ owner, repo, actionsOctokit }, { pull_number, label }) => {
+const removeLabel = async ({ owner, repo, actionsOctokit }, { number: pull_number, labels }, { label }) => {
     if (label === '') {
         core.debug('Empty label. Skipping removal');
+        return;
+    }
+    if (labels.map(l => l.name).includes(label) === false) {
+        core.debug(`Already missing label "${label}". Skipping removal`);
         return;
     }
     try {
@@ -246,28 +254,28 @@ const removeLabel = async ({ owner, repo, actionsOctokit }, { pull_number, label
  * This function is designed not to throw. It will log if there are failures
  * creating comments or adding/removing labels.
  */
-const reportConflicts = async (ctx, { pull_number, sourceBranch, targetBranch, intermediateBranch, conflicts, }) => {
+const reportConflicts = async (ctx, pr, { sourceBranch, targetBranch, intermediateBranch, conflicts, }) => {
     const notes = [];
     if (conflicts.sourceConflict) {
         notes.push(`Failed to merge \`${sourceBranch}\` into \`${intermediateBranch}\`. Possibly a conflict? It may help to delete branch \`${intermediateBranch}\` and re-run your \`sync-branches\` job in order to start fresh.`);
-        applyLabel(ctx, { pull_number, label: ctx.sourceConflictLabel });
+        applyLabel(ctx, pr, { label: ctx.sourceConflictLabel });
     }
     else {
         core.debug(`Encountered no ${sourceBranch} => ${intermediateBranch} conflict`);
-        removeLabel(ctx, { pull_number, label: ctx.sourceConflictLabel });
+        removeLabel(ctx, pr, { label: ctx.sourceConflictLabel });
     }
     if (conflicts.targetConflict) {
         notes.push(`Failed to merge \`${targetBranch}\` into \`${intermediateBranch}\`. Possibly a conflict? Check the status of this PR below.`);
-        applyLabel(ctx, { pull_number, label: ctx.targetConflictLabel });
+        applyLabel(ctx, pr, { label: ctx.targetConflictLabel });
     }
     else {
         core.debug(`Encountered no ${targetBranch} => ${intermediateBranch} conflict`);
-        removeLabel(ctx, { pull_number, label: ctx.targetConflictLabel });
+        removeLabel(ctx, pr, { label: ctx.targetConflictLabel });
     }
     for (const note of notes) {
         core.warning(note);
     }
-    await comment(ctx, { pull_number, notes });
+    await comment(ctx, pr, { notes });
 };
 /**
  * Closes, pauses, then reopens a given PR.
@@ -343,8 +351,7 @@ targetBranch) => {
     const existingPR = existingPRs[0];
     if (existingPR !== undefined) {
         core.info(`A PR from ${head} to ${targetBranch} already exists.`);
-        await reportConflicts(ctx, {
-            pull_number: existingPR.number,
+        await reportConflicts(ctx, existingPR, {
             sourceBranch: pushedBranch,
             intermediateBranch: head,
             targetBranch,
@@ -385,8 +392,7 @@ targetBranch) => {
     });
     core.debug(`Created new pull request: ${JSON.stringify(newPr)}`);
     core.info(`Successfully created PR: ${newPr.html_url}`);
-    await reportConflicts(ctx, {
-        pull_number: newPr.number,
+    await reportConflicts(ctx, newPr, {
         sourceBranch: pushedBranch,
         intermediateBranch: head,
         targetBranch,
@@ -440,8 +446,7 @@ sourceBranch) => {
         core.warning(`Failed to merge ${pushedBranch} into ${head}. Possibly a conflict?`);
         conflicts.targetConflict = true;
     }
-    await reportConflicts(ctx, {
-        pull_number: existingPR.number,
+    await reportConflicts(ctx, existingPR, {
         sourceBranch,
         intermediateBranch: head,
         targetBranch: pushedBranch,
