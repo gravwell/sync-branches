@@ -209,7 +209,7 @@ const removeLabel = async (
 	}
 };
 
-/** Descirbes any conflicts we may have encountered when merging branches */
+/** Describes any conflicts we may have encountered when merging branches */
 type ConflictSummary = {
 	sourceConflict: boolean;
 	targetConflict: boolean;
