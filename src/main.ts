@@ -124,7 +124,7 @@ const comment = async (
 \`sync-branches\` Action reports the following:
 
 {{#notes}}
-- {{.}}
+- {{{.}}}
 {{/notes}}
 `;
 

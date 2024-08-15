@@ -175,7 +175,7 @@ const comment = async (okit, { owner, repoName, pull_number, notes }) => {
 \`sync-branches\` Action reports the following:
 
 {{#notes}}
-- {{.}}
+- {{{.}}}
 {{/notes}}
 `;
     const body = mustache_1.default.render(commentReportTemplate, { notes });
