@@ -251,7 +251,7 @@ const handlePushToSourceBranch = async ({ owner, repoName, pushedBranch, targetB
             });
         }
         catch (_a) {
-            const msg = `Failed to merge ${pushedBranch} into ${head}. Possibly a conflict?`;
+            const msg = `Failed to merge \`${pushedBranch}\` into \`${head}\`. Possibly a conflict? It may help to delete branch \`${head}\` and re-run your \`sync-branches\` job in order to start fresh.`;
             core.warning(msg);
             notes.push(msg);
         }
@@ -265,7 +265,7 @@ const handlePushToSourceBranch = async ({ owner, repoName, pushedBranch, targetB
             });
         }
         catch (_b) {
-            const msg = `Failed to merge ${targetBranch} into ${head}. Possibly a conflict?`;
+            const msg = `Failed to merge \`${targetBranch}\` into \`${head}\`. Possibly a conflict? Check the status of this PR below.`;
             core.warning(msg);
             notes.push(msg);
         }
