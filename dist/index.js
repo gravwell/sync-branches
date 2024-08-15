@@ -110,17 +110,23 @@ const getBranch = async (okit, { owner, repo, branch }) => {
         throw new Error(`Could not find target branch: ${branch}`);
     }
 };
-/** Checks to see if a branch exists, and if it doesn't, creates that branch */
+/**
+ * Checks to see if a branch exists, and if it doesn't, creates that branch
+ *
+ * Returns true if a branch was created, otherwise false. Throws if the branch _can't_ be created.I
+ */
 const createBranch = async (okit, { owner, repo, branch, sha }) => {
     try {
         const foundBranch = await okit.repos.getBranch({ branch, owner, repo });
         core.info(`Found branch ${branch} at ${foundBranch.data.commit.sha}`);
+        return false;
     }
     catch (_a) {
         core.debug(`Branch ${branch} not found. Will try to create it.`);
         try {
             const newBranch = await okit.git.createRef({ owner, repo, ref: branchAsRef(branch), sha });
             core.info(`Created branch ${branch} at ${newBranch.data.object.sha}`);
+            return true;
         }
         catch (_b) {
             throw new Error(`Failed to create branch: ${branch}`);
@@ -156,6 +162,40 @@ const merge = async (okit, { owner, repoName, base, head }) => {
     return false;
 };
 /**
+ * Given a list of notes, constructs a comment containing a list of those notes.
+ *
+ * If the comment fails to post, this fn won't throw. It only logs.
+ */
+const comment = async (okit, { owner, repoName, pull_number, notes }) => {
+    if (notes.length === 0) {
+        core.debug('Skip commenting. Nothing to do.');
+        return;
+    }
+    const commentReportTemplate = `
+\`sync-branches\` Action reports the following:
+
+{{#notes}}
+- {{.}}
+{{/notes}}
+`;
+    const body = mustache_1.default.render(commentReportTemplate, { notes });
+    core.debug(`Constructed comment from ${JSON.stringify(notes)}: ${body}`);
+    try {
+        core.debug('Posting comment');
+        await okit.issues.createComment({ owner, repo: repoName, issue_number: pull_number, body });
+        core.debug('Posted comment');
+    }
+    catch (err) {
+        core.error(`Failed to create comment`);
+        if (err instanceof Error) {
+            core.error(err);
+        }
+        else {
+            core.error(`${err}`);
+        }
+    }
+};
+/**
  * Closes, pauses, then reopens a given PR.
  *
  * GitHub won't execute workflows in response to an event caused by GITHUB_TOKEN. This function
@@ -186,17 +226,22 @@ const kickCI = async (okit, pr) => {
 /** Creates/Updates a single sync PR when there is a push to the SOURCE (head) branch of that PR */
 const handlePushToSourceBranch = async ({ owner, repoName, pushedBranch, targetBranch, useIntermediateBranch, actionsOctokit, prOctokit, prTitleTemplate, prBodyTemplate, sourceBranchPattern, }) => {
     core.info(`Opening/Updating sync PR: ${pushedBranch} => ${targetBranch}`);
+    // Make sure the target branch exists
+    await getBranch(actionsOctokit, { owner, repo: repoName, branch: targetBranch });
     const head = useIntermediateBranch
         ? `merge/${pushedBranch.replace(/\//g, '-')}_to_${targetBranch.replace(/\//g, '-')}`
         : pushedBranch;
+    // A list of comments to post to the PR
+    const notes = [];
     // true if we need to close+reopen the PR to start CI, otherwise false
     let needsKick = false;
     if (useIntermediateBranch) {
-        // Try to fetch the target branch
-        const { commit: { sha: baseCommit }, } = await getBranch(actionsOctokit, { owner, repo: repoName, branch: targetBranch });
-        // create the intermediate branch off of target branch (base) (if necessary)
+        // Try to fetch the pushed branch
+        const { commit: { sha: baseCommit }, } = await getBranch(actionsOctokit, { owner, repo: repoName, branch: pushedBranch });
+        // create the intermediate branch off of source branch (pushed branch) (if necessary)
         await createBranch(actionsOctokit, { owner, repo: repoName, branch: head, sha: baseCommit });
-        // merge the source branch (head) into the intermediate branch
+        // merge the source branch into the intermediate branch
+        // this'll be a no-op if the branch is new, but may pull in changes if it's not.
         try {
             needsKick = await merge(actionsOctokit, {
                 owner,
@@ -206,11 +251,26 @@ const handlePushToSourceBranch = async ({ owner, repoName, pushedBranch, targetB
             });
         }
         catch (_a) {
-            throw new Error(`Failed to merge ${pushedBranch} into ${head}. Maybe delete ${head}?`);
+            const msg = `Failed to merge ${pushedBranch} into ${head}. Possibly a conflict?`;
+            core.warning(msg);
+            notes.push(msg);
+        }
+        // merge the target branch into the intermediate branch
+        try {
+            needsKick = await merge(actionsOctokit, {
+                owner,
+                repoName,
+                base: head,
+                head: targetBranch,
+            });
+        }
+        catch (_b) {
+            const msg = `Failed to merge ${targetBranch} into ${head}. Possibly a conflict?`;
+            core.warning(msg);
+            notes.push(msg);
         }
     }
     // List existing pulls from the given source to the desired target branch
-    const ownerHead = `${owner}:${head}`;
     const { data: pulls } = await actionsOctokit.pulls.list({
         owner,
         repo: repoName,
@@ -220,12 +280,18 @@ const handlePushToSourceBranch = async ({ owner, repoName, pushedBranch, targetB
     });
     const existingPRs = pulls.filter(p => p.head.ref === head && p.base.ref === targetBranch);
     if (existingPRs.length > 1) {
-        core.error(`Found multiple PRs from ${ownerHead} to ${targetBranch}. That's impossible.`);
+        core.error(`Found multiple PRs from ${head} to ${targetBranch}. That's impossible.`);
         core.info("I guess I'll just merge the first one.");
     }
     const existingPR = existingPRs[0];
     if (existingPR !== undefined) {
-        core.info(`A PR from ${ownerHead} to ${targetBranch} already exists.`);
+        core.info(`A PR from ${head} to ${targetBranch} already exists.`);
+        await comment(actionsOctokit, {
+            owner,
+            repoName,
+            pull_number: existingPR.number,
+            notes,
+        });
         if (needsKick && prOctokit !== actionsOctokit) {
             await kickCI(prOctokit, { owner, repo: repoName, pull_number: existingPR.number });
             core.info(`Successfully updated PR: ${existingPR.html_url}`);
@@ -256,13 +322,16 @@ const handlePushToSourceBranch = async ({ owner, repoName, pushedBranch, targetB
         repo: repoName,
         title,
         body,
-        head: ownerHead,
+        head,
         base: targetBranch,
-        headers: {
-            'X-GitHub-Api-Version': '2022-11-28',
-        },
     });
     core.debug(`Created new pull request: ${JSON.stringify(newPr)}`);
+    await comment(actionsOctokit, {
+        owner,
+        repoName,
+        pull_number: newPr.number,
+        notes,
+    });
     core.info(`Successfully created PR: ${newPr.html_url}`);
     return {
         baseBranch: newPr.base.ref,
@@ -309,7 +378,8 @@ const handlePushToTargetBranch = async ({ owner, repoName, pushedBranch, sourceB
         });
     }
     catch (_a) {
-        throw new Error(`Failed to merge ${pushedBranch} into ${head}. Maybe delete ${head}?`);
+        core.warning(`Failed to merge ${pushedBranch} into ${head}. Maybe close the PR, delete ${head}, and try again? ${existingPR.html_url}`);
+        return null;
     }
     if (needsKick && prOctokit !== actionsOctokit) {
         await kickCI(prOctokit, { owner, repo: repoName, pull_number: existingPR.number });
@@ -351,7 +421,7 @@ async function updateSyncPRs(actionsOctokit) {
     const syncedPRs = [];
     // If this action was triggered by a push to a SOURCE branch...
     if ((0, minimatch_1.minimatch)(pushedBranch, ctx.sourceBranchPattern) === true) {
-        core.debug(`Matched source pattern: ${{ pushedBranch, sourceBranchPattern: ctx.sourceBranchPattern }}`);
+        core.debug(`Matched source pattern: ${JSON.stringify({ pushedBranch, sourceBranchPattern: ctx.sourceBranchPattern })}`);
         const targets = branches.map(b => b.name).filter(b => (0, minimatch_1.minimatch)(b, ctx.targetBranchPattern));
         core.debug(`Will open/update sync PRs targeting: ${targets}`);
         for (const targetBranch of targets) {
@@ -371,7 +441,7 @@ async function updateSyncPRs(actionsOctokit) {
     }
     // If this action was triggered by a push to a TARGET branch...
     if ((0, minimatch_1.minimatch)(pushedBranch, ctx.targetBranchPattern) === true) {
-        core.debug(`Matched target pattern: ${{ pushedBranch, targetBranchPattern: ctx.targetBranchPattern }}`);
+        core.debug(`Matched target pattern: ${JSON.stringify({ pushedBranch, targetBranchPattern: ctx.targetBranchPattern })}`);
         const sources = branches.map(b => b.name).filter(b => (0, minimatch_1.minimatch)(b, ctx.sourceBranchPattern));
         core.debug(`Will update sync PRs with sources: ${sources}`);
         for (const sourceBranch of sources) {
