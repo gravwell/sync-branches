@@ -322,7 +322,7 @@ targetBranch) => {
         // merge the source branch into the intermediate branch
         // this'll be a no-op if the branch is new, but may pull in changes if it's not.
         try {
-            needsKick = await merge(ctx, { base: head, head: pushedBranch });
+            needsKick || (needsKick = await merge(ctx, { base: head, head: pushedBranch }));
             conflicts.sourceConflict = false;
         }
         catch (_a) {
@@ -330,7 +330,7 @@ targetBranch) => {
         }
         // merge the target branch into the intermediate branch
         try {
-            needsKick = await merge(ctx, { base: head, head: targetBranch });
+            needsKick || (needsKick = await merge(ctx, { base: head, head: targetBranch }));
             conflicts.targetConflict = false;
         }
         catch (_b) {
@@ -440,7 +440,7 @@ sourceBranch) => {
     let needsKick = false;
     const conflicts = { sourceConflict: false, targetConflict: false };
     try {
-        needsKick = await merge(ctx, { base: head, head: pushedBranch });
+        needsKick || (needsKick = await merge(ctx, { base: head, head: pushedBranch }));
         conflicts.targetConflict = false;
     }
     catch (_a) {

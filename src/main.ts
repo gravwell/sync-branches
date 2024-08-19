@@ -392,7 +392,7 @@ const handlePushToSourceBranch = async (
 		// merge the source branch into the intermediate branch
 		// this'll be a no-op if the branch is new, but may pull in changes if it's not.
 		try {
-			needsKick = await merge(ctx, { base: head, head: pushedBranch });
+			needsKick ||= await merge(ctx, { base: head, head: pushedBranch });
 			conflicts.sourceConflict = false;
 		} catch {
 			conflicts.sourceConflict = true;
@@ -400,7 +400,7 @@ const handlePushToSourceBranch = async (
 
 		// merge the target branch into the intermediate branch
 		try {
-			needsKick = await merge(ctx, { base: head, head: targetBranch });
+			needsKick ||= await merge(ctx, { base: head, head: targetBranch });
 			conflicts.targetConflict = false;
 		} catch {
 			conflicts.targetConflict = true;
@@ -530,7 +530,7 @@ const handlePushToTargetBranch = async (
 	const conflicts: ConflictSummary = { sourceConflict: false, targetConflict: false };
 
 	try {
-		needsKick = await merge(ctx, { base: head, head: pushedBranch });
+		needsKick ||= await merge(ctx, { base: head, head: pushedBranch });
 		conflicts.targetConflict = false;
 	} catch {
 		core.warning(`Failed to merge ${pushedBranch} into ${head}. Possibly a conflict?`);
