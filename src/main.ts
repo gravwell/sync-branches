@@ -128,7 +128,7 @@ const comment = async (
 	core.debug(`Constructed comment from ${JSON.stringify(notes)}: ${body}`);
 
 	try {
-		core.debug('Posting comment');
+		core.info(`Posting comment to ${pull_number}`);
 		await actionsOctokit.issues.createComment({ owner, repo, issue_number: pull_number, body });
 		core.debug('Posted comment');
 	} catch (err) {
@@ -162,7 +162,7 @@ const applyLabel = async (
 	}
 
 	try {
-		core.debug(`Applying label: ${label}`);
+		core.info(`Applying label "${label}" to ${pull_number}`);
 		await actionsOctokit.issues.addLabels({ owner, repo, issue_number: pull_number, labels: [label] });
 		core.debug(`Applied label: ${label}`);
 	} catch (err) {
@@ -196,7 +196,7 @@ const removeLabel = async (
 	}
 
 	try {
-		core.debug(`Removing label: ${label}`);
+		core.info(`Removing label "${label}" from ${pull_number}`);
 		await actionsOctokit.issues.removeLabel({ owner, repo, issue_number: pull_number, name: label });
 		core.debug(`Removed label: ${label}`);
 	} catch (err) {
@@ -280,6 +280,8 @@ const kickCI = async (
 	if (actionsOctokit === prOctokit) {
 		core.debug('Actions Octokit is the same as PR Octokit. Skipping CI kick.');
 	}
+
+	core.info('Kicking CI with a Close + Reopen');
 
 	core.debug(`Closing ${pull_number}`);
 	await prOctokit.pulls.update({ owner, repo, pull_number, state: 'closed' });
@@ -457,7 +459,7 @@ const handlePushToSourceBranch = async (
 	const body = Mustache.render(prBodyTemplate, templateContext);
 
 	// Apparently this NEEDS read&write for PR and at least read for contents... despite what the docs say.
-	core.debug('Create new pull request');
+	core.info('Creating a new pull request...');
 	const { data: newPr } = await prOctokit.pulls.create({
 		owner,
 		repo,

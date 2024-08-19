@@ -176,7 +176,7 @@ const comment = async ({ owner, repo, actionsOctokit }, { number: pull_number },
     const body = mustache_1.default.render(commentReportTemplate, { notes });
     core.debug(`Constructed comment from ${JSON.stringify(notes)}: ${body}`);
     try {
-        core.debug('Posting comment');
+        core.info(`Posting comment to ${pull_number}`);
         await actionsOctokit.issues.createComment({ owner, repo, issue_number: pull_number, body });
         core.debug('Posted comment');
     }
@@ -205,7 +205,7 @@ const applyLabel = async ({ owner, repo, actionsOctokit }, { number: pull_number
         return;
     }
     try {
-        core.debug(`Applying label: ${label}`);
+        core.info(`Applying label "${label}" to ${pull_number}`);
         await actionsOctokit.issues.addLabels({ owner, repo, issue_number: pull_number, labels: [label] });
         core.debug(`Applied label: ${label}`);
     }
@@ -234,7 +234,7 @@ const removeLabel = async ({ owner, repo, actionsOctokit }, { number: pull_numbe
         return;
     }
     try {
-        core.debug(`Removing label: ${label}`);
+        core.info(`Removing label "${label}" from ${pull_number}`);
         await actionsOctokit.issues.removeLabel({ owner, repo, issue_number: pull_number, name: label });
         core.debug(`Removed label: ${label}`);
     }
@@ -289,6 +289,7 @@ const kickCI = async ({ owner, repo, actionsOctokit, prOctokit }, { pull_number 
     if (actionsOctokit === prOctokit) {
         core.debug('Actions Octokit is the same as PR Octokit. Skipping CI kick.');
     }
+    core.info('Kicking CI with a Close + Reopen');
     core.debug(`Closing ${pull_number}`);
     await prOctokit.pulls.update({ owner, repo, pull_number, state: 'closed' });
     core.debug(`Closed ${pull_number}`);
@@ -381,7 +382,7 @@ targetBranch) => {
     const title = mustache_1.default.render(prTitleTemplate, templateContext);
     const body = mustache_1.default.render(prBodyTemplate, templateContext);
     // Apparently this NEEDS read&write for PR and at least read for contents... despite what the docs say.
-    core.debug('Create new pull request');
+    core.info('Creating a new pull request...');
     const { data: newPr } = await prOctokit.pulls.create({
         owner,
         repo,
