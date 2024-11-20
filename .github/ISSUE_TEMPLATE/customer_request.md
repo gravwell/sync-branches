@@ -1,10 +1,9 @@
 ---
-name: Feature Request
-about: Use this template for requesting a new feature. This template should be used to request a new feature or functionality that does not currently exist in the application.
-labels: 05 - feature, 03 - Low
+name: Customer Feature Request
+about: Use this template for documenting a new feature requested by a customer.
+labels: 05 - feature, 14 - customer request, 03 - Low
 title: "[FEATURE SCOPE]: [TITLE]"
 ---
-
 <!--
 ## Instructions
 Labels for change type and priority are automatically assigned at the time of creation. 
@@ -21,7 +20,8 @@ please set the priority to High.
 If this request does not meet the above criteria but is more important,
 please set the priority to Medium. 
 -->
-# Feature
+
+# Customer Request
 
 ## What is the feature to be added?
 
