@@ -46,5 +46,5 @@ outputs:
     description: |
       An array of objects describing each updated PR. See README for details.
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/index.js'
