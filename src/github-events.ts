@@ -2,12 +2,12 @@ import { Decoder, object, string } from 'decoders';
 import { readFile } from 'fs/promises';
 
 /**
- * Push event details
- * https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#push
- * https://docs.github.com/en/developers/webhooks-and-events/webhooks/webhook-events-and-payloads#push
+ * The parts of a push or workflow_dispatch event that we use.
+ * In both, `ref` is the branch that was pushed to or that the workflow was run on.
+ * https://docs.github.com/en/webhooks/webhook-events-and-payloads#push
+ * https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_dispatch
  */
-export type PushEvent = {
-	after: string;
+export type BranchEvent = {
 	ref: string;
 	repository: {
 		name: string;
@@ -17,8 +17,7 @@ export type PushEvent = {
 	};
 };
 
-export const pushEvent: Decoder<PushEvent> = object({
-	after: string,
+export const branchEvent: Decoder<BranchEvent> = object({
 	ref: string,
 	repository: object({
 		name: string,
@@ -28,8 +27,8 @@ export const pushEvent: Decoder<PushEvent> = object({
 	}),
 });
 
-/** Returns push event values gathered from CI environment variables */
-export const checkPushEventEnv = async (): Promise<PushEvent> => {
+/** Returns push or workflow_dispatch event values gathered from CI environment variables */
+export const checkBranchEventEnv = async (): Promise<BranchEvent> => {
 	const eventPath = process.env.GITHUB_EVENT_PATH;
 	if (!eventPath) {
 		throw new Error('Expected non-nil event path');
@@ -42,5 +41,5 @@ export const checkPushEventEnv = async (): Promise<PushEvent> => {
 
 	const buf = await readFile(eventPath);
 	const value = JSON.parse(buf.toString());
-	return pushEvent.verify(value);
+	return branchEvent.verify(value);
 };
