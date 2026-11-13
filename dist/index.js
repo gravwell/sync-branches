@@ -7,11 +7,10 @@ require('./sourcemap-register.js');/******/ (() => { // webpackBootstrap
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.checkPushEventEnv = exports.pushEvent = void 0;
+exports.checkBranchEventEnv = exports.branchEvent = void 0;
 const decoders_1 = __nccwpck_require__(8186);
 const promises_1 = __nccwpck_require__(3292);
-exports.pushEvent = (0, decoders_1.object)({
-    after: decoders_1.string,
+exports.branchEvent = (0, decoders_1.object)({
     ref: decoders_1.string,
     repository: (0, decoders_1.object)({
         name: decoders_1.string,
@@ -20,8 +19,8 @@ exports.pushEvent = (0, decoders_1.object)({
         }),
     }),
 });
-/** Returns push event values gathered from CI environment variables */
-const checkPushEventEnv = async () => {
+/** Returns push or workflow_dispatch event values gathered from CI environment variables */
+const checkBranchEventEnv = async () => {
     const eventPath = process.env.GITHUB_EVENT_PATH;
     if (!eventPath) {
         throw new Error('Expected non-nil event path');
@@ -32,9 +31,9 @@ const checkPushEventEnv = async () => {
     }
     const buf = await (0, promises_1.readFile)(eventPath);
     const value = JSON.parse(buf.toString());
-    return exports.pushEvent.verify(value);
+    return exports.branchEvent.verify(value);
 };
-exports.checkPushEventEnv = checkPushEventEnv;
+exports.checkBranchEventEnv = checkBranchEventEnv;
 
 
 /***/ }),
@@ -479,7 +478,7 @@ sourceBranch) => {
 };
 /** Creates/Updates sync PRs according to provided branch patterns */
 async function updateSyncPRs(actionsOctokit) {
-    const { ref, repository: { name: repo, owner: { login: owner }, }, } = await (0, github_events_1.checkPushEventEnv)();
+    const { ref, repository: { name: repo, owner: { login: owner }, }, } = await (0, github_events_1.checkBranchEventEnv)();
     const pushedBranch = refAsBranch(ref);
     if ((0, lodash_1.isNil)(pushedBranch)) {
         throw new Error(`Unable to determine head branch. ref was ${ref}. Did you forget to limit the workflow to only branches?`);
@@ -546,9 +545,15 @@ async function updateSyncPRs(actionsOctokit) {
     core.setOutput('syncedPRs', syncedPRs);
     core.info('Done');
 }
+/**
+ * Events whose `ref` names the branch to sync.
+ * workflow_dispatch lets a schedule or a person sync a branch without pushing to it.
+ */
+const supportedEvents = ['push', 'workflow_dispatch'];
 async function run() {
-    if (process.env.GITHUB_EVENT_NAME !== 'push') {
-        core.setFailed(`sync-branches only works on "push" events`);
+    var _a;
+    if (!supportedEvents.includes((_a = process.env.GITHUB_EVENT_NAME) !== null && _a !== void 0 ? _a : '')) {
+        core.setFailed(`sync-branches only works on "push" and "workflow_dispatch" events`);
         return;
     }
     try {

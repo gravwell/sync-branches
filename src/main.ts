@@ -5,7 +5,7 @@ import { RequestError } from '@octokit/request-error';
 import { isNil } from 'lodash';
 import { minimatch } from 'minimatch';
 import Mustache from 'mustache';
-import { checkPushEventEnv } from './github-events';
+import { checkBranchEventEnv } from './github-events';
 
 /**
  * Creates a new Octokit instance that authenticates with the given Personal Access Token (PAT)
@@ -568,7 +568,7 @@ async function updateSyncPRs(actionsOctokit: Octokit): Promise<void> {
 			name: repo,
 			owner: { login: owner },
 		},
-	} = await checkPushEventEnv();
+	} = await checkBranchEventEnv();
 
 	const pushedBranch = refAsBranch(ref);
 	if (isNil(pushedBranch)) {
@@ -658,9 +658,15 @@ async function updateSyncPRs(actionsOctokit: Octokit): Promise<void> {
 	core.info('Done');
 }
 
+/**
+ * Events whose `ref` names the branch to sync.
+ * workflow_dispatch lets a schedule or a person sync a branch without pushing to it.
+ */
+const supportedEvents = ['push', 'workflow_dispatch'];
+
 async function run(): Promise<void> {
-	if (process.env.GITHUB_EVENT_NAME !== 'push') {
-		core.setFailed(`sync-branches only works on "push" events`);
+	if (!supportedEvents.includes(process.env.GITHUB_EVENT_NAME ?? '')) {
+		core.setFailed(`sync-branches only works on "push" and "workflow_dispatch" events`);
 		return;
 	}
 

@@ -202,3 +202,15 @@ jobs:
           source_pattern: release/*
           target_pattern: main
 ```
+
+### Running on demand
+
+The action also runs on `workflow_dispatch`. It treats the branch the workflow was run on like a branch that was just pushed to. This lets you sync on a schedule or by hand instead of on every push. For example, a scheduled workflow can run `gh workflow run sync-branches.yml --ref STABLE`.
+
+```yaml
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+```
