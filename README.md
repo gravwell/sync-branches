@@ -203,14 +203,32 @@ jobs:
           target_pattern: main
 ```
 
-### Running on demand
+### Running on a schedule or by hand
 
-The action also runs on `workflow_dispatch`. It treats the branch the workflow was run on like a branch that was just pushed to. This lets you sync on a schedule or by hand instead of on every push. For example, a scheduled workflow can run `gh workflow run sync-branches.yml --ref STABLE`.
+The action also runs on `schedule` and `workflow_dispatch`. On those events, it doesn't care which branch the workflow runs on. It syncs every branch that matches `source_pattern` to every branch that matches `target_pattern`. Each sync merges both the source and the target into the intermediate branch, so one run catches up with whichever side moved.
+
+On any event, the action skips a sync when no sync PR is open and the source has nothing the target doesn't.
+
+This lets you sync once a day instead of on every push:
 
 ```yaml
 on:
-  push:
-    branches:
-      - '**'
+  schedule:
+    - cron: '47 17 * * 1-5'
+      timezone: America/Denver
   workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: gravwell/sync-branches@v2
+        with:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_CREATE_TOKEN: ${{ secrets.MY_PAT }}
+          use_intermediate_branch: true
+          source_pattern: next-patch
+          target_pattern: next-minor
 ```
+
+GitHub runs `schedule` only from the workflow file on the default branch. The action works through the API, so that one file can sync any branches.
