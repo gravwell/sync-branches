@@ -101,6 +101,20 @@ const merge = async (
 	return false;
 };
 
+/** True if `head` has commits that `base` doesn't. */
+const hasNewCommits = async (
+	{ owner, repo, actionsOctokit }: EventContext,
+	{ base, head }: { base: string; head: string },
+): Promise<boolean> => {
+	const { data } = await actionsOctokit.repos.compareCommitsWithBasehead({
+		owner,
+		repo,
+		basehead: `${base}...${head}`,
+		per_page: 1,
+	});
+	return data.ahead_by > 0;
+};
+
 /**
  * Given a list of notes, constructs a comment containing a list of those notes.
  *
@@ -374,6 +388,28 @@ const handlePushToSourceBranch = async (
 		? `merge/${pushedBranch.replace(/\//g, '-')}_to_${targetBranch.replace(/\//g, '-')}`
 		: pushedBranch;
 
+	// List existing pulls from the given source to the desired target branch
+	const { data: pulls } = await actionsOctokit.pulls.list({
+		owner,
+		repo,
+		base: targetBranch,
+		head,
+		state: 'open',
+	});
+	const existingPRs = pulls.filter(p => p.head.ref === head && p.base.ref === targetBranch);
+	if (existingPRs.length > 1) {
+		core.warning(`Found multiple PRs from ${head} to ${targetBranch}. That's impossible... Merging the first one.`);
+	}
+
+	const existingPR = existingPRs[0];
+
+	// With no sync PR open and nothing new on the source, a sync would open an empty PR (or fail to open one).
+	// A push always brings new commits, but a scheduled or manual run often doesn't.
+	if (existingPR === undefined && !(await hasNewCommits(ctx, { base: targetBranch, head: pushedBranch }))) {
+		core.info(`${pushedBranch} has nothing new for ${targetBranch}. Skipping.`);
+		return null;
+	}
+
 	// Track encountered merge conflicts
 	const conflicts: ConflictSummary = { sourceConflict: false, targetConflict: false };
 
@@ -407,20 +443,6 @@ const handlePushToSourceBranch = async (
 		}
 	}
 
-	// List existing pulls from the given source to the desired target branch
-	const { data: pulls } = await actionsOctokit.pulls.list({
-		owner,
-		repo,
-		base: targetBranch,
-		head,
-		state: 'open',
-	});
-	const existingPRs = pulls.filter(p => p.head.ref === head && p.base.ref === targetBranch);
-	if (existingPRs.length > 1) {
-		core.warning(`Found multiple PRs from ${head} to ${targetBranch}. That's impossible... Merging the first one.`);
-	}
-
-	const existingPR = existingPRs[0];
 	if (existingPR !== undefined) {
 		core.info(`A PR from ${head} to ${targetBranch} already exists.`);
 

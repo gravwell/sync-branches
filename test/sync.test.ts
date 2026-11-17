@@ -214,13 +214,13 @@ describe('push', () => {
 		expect(gh.callsTo('git.createRef')).toEqual([]);
 	});
 
-	it('opens a sync PR even when the source has nothing new for the target', async () => {
+	it('skips the sync when the source has nothing new for the target and no sync PR is open', async () => {
 		const gh = new FakeGitHub().branch('main').branch('next-patch', 'main');
 
 		await runAction(gh, { event: 'push', branch: 'main', ...mainToNextPatch });
 
-		// A PR opens from the intermediate branch, though it has nothing from main that next-patch lacks.
-		expect(gh.openPRs()).toMatchObject([{ head: 'merge/main_to_next-patch', base: 'next-patch' }]);
+		// No intermediate branch, merges, PRs or comments.
+		expect(writes(gh)).toEqual([]);
 	});
 });
 
