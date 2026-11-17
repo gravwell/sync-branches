@@ -189,20 +189,6 @@ export class FakeGitHub {
 					return { data: {} };
 				},
 			},
-			paginate: async (
-				method: (p: Record<string, unknown>) => Promise<{ data: unknown[] }>,
-				params: Record<string, unknown>,
-			) => {
-				const perPage = (params.per_page as number | undefined) ?? 30;
-				const all: unknown[] = [];
-				for (let page = 1; ; page++) {
-					const { data } = await method({ ...params, per_page: perPage, page });
-					all.push(...data);
-					if (data.length < perPage) {
-						return all;
-					}
-				}
-			},
 		};
 		return fake as unknown as Octokit;
 	}

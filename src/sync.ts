@@ -5,7 +5,7 @@ import { RequestError } from '@octokit/request-error';
 import { isNil } from 'lodash';
 import { minimatch } from 'minimatch';
 import Mustache from 'mustache';
-import { checkBranchEventEnv } from './github-events';
+import { checkBranchEventEnv, repoFromEnv } from './github-events';
 
 /**
  * Creates a new Octokit instance that authenticates with the given Personal Access Token (PAT)
@@ -99,6 +99,23 @@ const merge = async (
 	// Unless we receive an undocumented 2xx return code, this code is unreachable.
 	core.error(`Unknown return status (${status}). Assuming we don't need to kick CI.`);
 	return false;
+};
+
+/** Lists the names of every branch in the repo, one page of 100 at a time. */
+const listBranchNames = async ({
+	owner,
+	repo,
+	actionsOctokit,
+}: Pick<EventContext, 'owner' | 'repo' | 'actionsOctokit'>): Promise<string[]> => {
+	const perPage = 100;
+	const names: string[] = [];
+	for (let page = 1; ; page++) {
+		const { data } = await actionsOctokit.repos.listBranches({ owner, repo, per_page: perPage, page });
+		names.push(...data.map(b => b.name));
+		if (data.length < perPage) {
+			return names;
+		}
+	}
 };
 
 /** True if `head` has commits that `base` doesn't. */
@@ -315,7 +332,10 @@ type EventContext = {
 	/** The name of the repo: "frontend" in "gravwell/frontend" */
 	repo: string;
 
-	/** The NAME of the branch (not the full ref) that was pushed to. The one that triggered this workflow. */
+	/**
+	 * The NAME of the branch (not the full ref) to sync. On a push, the branch that was pushed to. On a scheduled or
+	 * manual run, each source branch in turn.
+	 */
 	pushedBranch: string;
 
 	/**
@@ -582,21 +602,36 @@ const handlePushToTargetBranch = async (
 	return null; // PR existed, didn't update it, didn't kick it, didn't change it
 };
 
+/**
+ * Events that sync every source branch, whatever branch the workflow runs on.
+ * A schedule runs on the default branch, so its ref says nothing about what to sync.
+ */
+const syncEverySourceEvents = ['schedule', 'workflow_dispatch'];
+
+const supportedEvents = ['push', ...syncEverySourceEvents];
+
 /** Creates/Updates sync PRs according to provided branch patterns */
 async function updateSyncPRs(actionsOctokit: Octokit): Promise<void> {
-	const {
-		ref,
-		repository: {
-			name: repo,
-			owner: { login: owner },
-		},
-	} = await checkBranchEventEnv();
+	const eventName = process.env.GITHUB_EVENT_NAME ?? '';
 
-	const pushedBranch = refAsBranch(ref);
-	if (isNil(pushedBranch)) {
-		throw new Error(
-			`Unable to determine head branch. ref was ${ref}. Did you forget to limit the workflow to only branches?`,
-		);
+	// On a push, the branch that was pushed to. Unused on a scheduled or manual run.
+	let pushedBranch: string | null = null;
+	let owner: string;
+	let repo: string;
+
+	if (eventName === 'push') {
+		const event = await checkBranchEventEnv();
+		owner = event.repository.owner.login;
+		repo = event.repository.name;
+
+		pushedBranch = refAsBranch(event.ref);
+		if (isNil(pushedBranch)) {
+			throw new Error(
+				`Unable to determine head branch. ref was ${event.ref}. Did you forget to limit the workflow to only branches?`,
+			);
+		}
+	} else {
+		({ owner, repo } = repoFromEnv());
 	}
 
 	const prToken = core.getInput('PR_CREATE_TOKEN');
@@ -604,10 +639,9 @@ async function updateSyncPRs(actionsOctokit: Octokit): Promise<void> {
 	// Octokit based by a PAT, if provided, otherwise the default GITHUB_TOKEN octokit
 	const prOctokit = await (prToken !== '' ? mkOctokitFromPAT(prToken) : actionsOctokit);
 
-	const ctx: EventContext = {
+	const baseCtx: Omit<EventContext, 'pushedBranch'> = {
 		owner,
 		repo,
-		pushedBranch,
 
 		sourceBranchPattern: core.getInput('source_pattern', { required: true }),
 		targetBranchPattern: core.getInput('target_pattern', { required: true }),
@@ -622,55 +656,66 @@ async function updateSyncPRs(actionsOctokit: Octokit): Promise<void> {
 		actionsOctokit,
 		prOctokit,
 	};
+	const ctxFor = (branch: string): EventContext => ({ ...baseCtx, pushedBranch: branch });
 
-	const { data: branches } = await actionsOctokit.repos.listBranches({ owner, repo });
+	const branches = await listBranchNames(baseCtx);
+	const sources = branches.filter(b => minimatch(b, baseCtx.sourceBranchPattern));
+	const targets = branches.filter(b => minimatch(b, baseCtx.targetBranchPattern));
 
 	const syncedPRs: PRUpdate[] = [];
 
-	// If this action was triggered by a push to a SOURCE branch...
-	if (minimatch(pushedBranch, ctx.sourceBranchPattern) === true) {
-		core.debug(
-			`Matched source pattern: ${JSON.stringify({ pushedBranch, sourceBranchPattern: ctx.sourceBranchPattern })}`,
-		);
-		const targets = branches.map(b => b.name).filter(b => minimatch(b, ctx.targetBranchPattern));
-		core.debug(`Will open/update sync PRs targeting: ${targets}`);
-
-		for (const targetBranch of targets) {
-			try {
-				const update = await handlePushToSourceBranch(ctx, targetBranch);
-				if (update) {
-					syncedPRs.push(update);
-				}
-			} catch (err: unknown) {
-				if (err instanceof RequestError) {
-					core.error(`status: ${err.status}`);
-				}
-
-				core.setFailed(err instanceof Error ? err : `${err}`);
+	/** Runs one sync. A failure fails the action but doesn't stop the other syncs. */
+	const trySync = async (sync: () => Promise<PRUpdate | null>): Promise<void> => {
+		try {
+			const update = await sync();
+			if (update) {
+				syncedPRs.push(update);
 			}
-		}
-	}
+		} catch (err: unknown) {
+			if (err instanceof RequestError) {
+				core.error(`status: ${err.status}`);
+			}
 
-	// If this action was triggered by a push to a TARGET branch...
-	if (minimatch(pushedBranch, ctx.targetBranchPattern) === true) {
-		core.debug(
-			`Matched target pattern: ${JSON.stringify({ pushedBranch, targetBranchPattern: ctx.targetBranchPattern })}`,
-		);
-		const sources = branches.map(b => b.name).filter(b => minimatch(b, ctx.sourceBranchPattern));
-		core.debug(`Will update sync PRs with sources: ${sources}`);
+			core.setFailed(err instanceof Error ? err : `${err}`);
+		}
+	};
+
+	if (pushedBranch === null) {
+		// A scheduled or manual run: sync every source to every target. Each sync merges both the source and the
+		// target into the intermediate branch, so it catches up with whichever side moved.
+		core.info(`Syncing ${sources.join(', ') || 'no branches'} => ${targets.join(', ') || 'no branches'}`);
 
 		for (const sourceBranch of sources) {
-			try {
-				const update = await handlePushToTargetBranch(ctx, sourceBranch);
-				if (update) {
-					syncedPRs.push(update);
+			for (const targetBranch of targets) {
+				if (sourceBranch !== targetBranch) {
+					await trySync(async () => handlePushToSourceBranch(ctxFor(sourceBranch), targetBranch));
 				}
-			} catch (err: unknown) {
-				if (err instanceof RequestError) {
-					core.error(`status: ${err.status}`);
-				}
+			}
+		}
+	} else {
+		const ctx = ctxFor(pushedBranch);
 
-				core.setFailed(err instanceof Error ? err : `${err}`);
+		// If this action was triggered by a push to a SOURCE branch...
+		if (minimatch(pushedBranch, ctx.sourceBranchPattern) === true) {
+			core.debug(
+				`Matched source pattern: ${JSON.stringify({ pushedBranch, sourceBranchPattern: ctx.sourceBranchPattern })}`,
+			);
+			core.debug(`Will open/update sync PRs targeting: ${targets}`);
+
+			for (const targetBranch of targets) {
+				await trySync(async () => handlePushToSourceBranch(ctx, targetBranch));
+			}
+		}
+
+		// If this action was triggered by a push to a TARGET branch...
+		if (minimatch(pushedBranch, ctx.targetBranchPattern) === true) {
+			core.debug(
+				`Matched target pattern: ${JSON.stringify({ pushedBranch, targetBranchPattern: ctx.targetBranchPattern })}`,
+			);
+			core.debug(`Will update sync PRs with sources: ${sources}`);
+
+			for (const sourceBranch of sources) {
+				await trySync(async () => handlePushToTargetBranch(ctx, sourceBranch));
 			}
 		}
 	}
@@ -681,17 +726,11 @@ async function updateSyncPRs(actionsOctokit: Octokit): Promise<void> {
 }
 
 /**
- * Events whose `ref` names the branch to sync.
- * workflow_dispatch lets a schedule or a person sync a branch without pushing to it.
- */
-const supportedEvents = ['push', 'workflow_dispatch'];
-
-/**
  * Runs the action. `newOctokit` builds the GITHUB_TOKEN client; tests pass a fake.
  */
 export async function run(newOctokit: () => Octokit = () => new Octokit()): Promise<void> {
 	if (!supportedEvents.includes(process.env.GITHUB_EVENT_NAME ?? '')) {
-		core.setFailed(`sync-branches only works on "push" and "workflow_dispatch" events`);
+		core.setFailed(`sync-branches only works on "push", "schedule" and "workflow_dispatch" events`);
 		return;
 	}
 

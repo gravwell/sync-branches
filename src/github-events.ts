@@ -2,10 +2,8 @@ import { Decoder, object, string } from 'decoders';
 import { readFile } from 'fs/promises';
 
 /**
- * The parts of a push or workflow_dispatch event that we use.
- * In both, `ref` is the branch that was pushed to or that the workflow was run on.
+ * The parts of a push event that we use. `ref` is the branch that was pushed to.
  * https://docs.github.com/en/webhooks/webhook-events-and-payloads#push
- * https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_dispatch
  */
 export type BranchEvent = {
 	ref: string;
@@ -27,7 +25,7 @@ export const branchEvent: Decoder<BranchEvent> = object({
 	}),
 });
 
-/** Returns push or workflow_dispatch event values gathered from CI environment variables */
+/** Returns push event values gathered from CI environment variables */
 export const checkBranchEventEnv = async (): Promise<BranchEvent> => {
 	const eventPath = process.env.GITHUB_EVENT_PATH;
 	if (!eventPath) {
@@ -42,4 +40,16 @@ export const checkBranchEventEnv = async (): Promise<BranchEvent> => {
 	const buf = await readFile(eventPath);
 	const value = JSON.parse(buf.toString());
 	return branchEvent.verify(value);
+};
+
+/**
+ * Returns the repo from GITHUB_REPOSITORY ("owner/repo").
+ * Scheduled and manual runs use this: a schedule event's payload doesn't name the repo.
+ */
+export const repoFromEnv = (): { owner: string; repo: string } => {
+	const [owner, repo] = (process.env.GITHUB_REPOSITORY ?? '').split('/');
+	if (!owner || !repo) {
+		throw new Error('Expected GITHUB_REPOSITORY like "owner/repo"');
+	}
+	return { owner, repo };
 };

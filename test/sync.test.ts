@@ -224,6 +224,118 @@ describe('push', () => {
 	});
 });
 
+describe.each(['schedule', 'workflow_dispatch'] as const)('%s', event => {
+	const nextPatchToNextMinor = { source: 'next-patch', target: 'next-minor' };
+
+	/** A repo where next-patch has one commit that next-minor doesn't. */
+	const nextPatchAhead = (): FakeGitHub =>
+		new FakeGitHub().branch('main').branch('next-patch', 'main').branch('next-minor', 'next-patch').push('next-patch');
+
+	/** nextPatchAhead, after a run opened the next-patch => next-minor sync PR. */
+	const withNextMinorSyncPR = async (): Promise<FakeGitHub> => {
+		const gh = nextPatchAhead();
+		await runAction(gh, { event, branch: 'main', ...nextPatchToNextMinor });
+		gh.calls.length = 0;
+		return gh;
+	};
+
+	it('opens a sync PR from the source, whatever branch the run is on', async () => {
+		const gh = nextPatchAhead();
+
+		await runAction(gh, { event, branch: 'main', ...nextPatchToNextMinor });
+
+		// One open PR from merge/next-patch_to_next-minor, though the run was on main.
+		expect(gh.openPRs()).toMatchObject([{ head: 'merge/next-patch_to_next-minor', base: 'next-minor' }]);
+	});
+
+	it('merges new source commits into the open sync PR and restarts its CI', async () => {
+		const gh = await withNextMinorSyncPR();
+		gh.push('next-patch');
+
+		await runAction(gh, { event, branch: 'main', ...nextPatchToNextMinor });
+
+		// The intermediate branch has the new next-patch commit, and the PR was closed and reopened.
+		expect(gh.contains('merge/next-patch_to_next-minor', 'next-patch')).toBe(true);
+		expect(kicks(gh)).toEqual(['closed', 'open']);
+	});
+
+	it('merges new target commits into the open sync PR and restarts its CI', async () => {
+		const gh = await withNextMinorSyncPR();
+		gh.push('next-minor');
+
+		await runAction(gh, { event, branch: 'main', ...nextPatchToNextMinor });
+
+		// The intermediate branch has the new next-minor commit, and the PR was closed and reopened.
+		expect(gh.contains('merge/next-patch_to_next-minor', 'next-minor')).toBe(true);
+		expect(kicks(gh)).toEqual(['closed', 'open']);
+	});
+
+	it('leaves the open sync PR alone when nothing changed', async () => {
+		const gh = await withNextMinorSyncPR();
+
+		await runAction(gh, { event, branch: 'main', ...nextPatchToNextMinor });
+
+		// No close and reopen, and no new PR.
+		expect(kicks(gh)).toEqual([]);
+		expect(gh.prs).toHaveLength(1);
+	});
+
+	it('skips the sync when the source has nothing new and no sync PR is open', async () => {
+		const gh = new FakeGitHub().branch('main').branch('next-patch', 'main').branch('next-minor', 'next-patch');
+
+		await runAction(gh, { event, branch: 'main', ...nextPatchToNextMinor });
+
+		// No intermediate branch, merges, PRs or comments.
+		expect(writes(gh)).toEqual([]);
+	});
+
+	it('syncs every branch that matches the source pattern to every branch that matches the target pattern', async () => {
+		const gh = new FakeGitHub()
+			.branch('main')
+			.branch('release/a', 'main')
+			.branch('release/b', 'main')
+			.branch('preview/a', 'main')
+			.branch('preview/b', 'main')
+			.push('release/a')
+			.push('release/b');
+
+		await runAction(gh, { event, branch: 'main', source: 'release/*', target: 'preview/*' });
+
+		// One PR for each source and target pair.
+		expect(gh.openPRs().map(pr => pr.head)).toEqual([
+			'merge/release-a_to_preview-a',
+			'merge/release-a_to_preview-b',
+			'merge/release-b_to_preview-a',
+			'merge/release-b_to_preview-b',
+		]);
+	});
+
+	it('labels the sync PR when the target conflicts with the intermediate branch', async () => {
+		const gh = await withNextMinorSyncPR();
+		gh.push('next-minor').conflict('merge/next-patch_to_next-minor', 'next-minor');
+
+		await runAction(gh, { event, branch: 'main', ...nextPatchToNextMinor });
+
+		// The PR has the target conflict label.
+		expect(gh.openPRs()[0]?.labels).toEqual(['conflict']);
+	});
+});
+
+describe('branch list', () => {
+	it('finds branches past the first page', async () => {
+		const gh = new FakeGitHub().branch('next-major');
+		for (let i = 0; i < 120; i++) {
+			gh.branch(`feature/${i}`, 'next-major');
+		}
+		gh.branch('preview/major/a', 'next-major').push('next-major');
+
+		await runAction(gh, { event: 'push', branch: 'next-major', source: 'next-major', target: 'preview/major/*' });
+
+		// The preview branch, 122nd in the list, gets its sync PR.
+		expect(gh.openPRs()).toMatchObject([{ head: 'merge/next-major_to_preview-major-a' }]);
+	});
+});
+
 describe('events', () => {
 	it('fails on an event it does not support', async () => {
 		const gh = mainAhead();
