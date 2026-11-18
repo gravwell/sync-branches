@@ -7,7 +7,7 @@ require('./sourcemap-register.js');/******/ (() => { // webpackBootstrap
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.checkBranchEventEnv = exports.branchEvent = void 0;
+exports.repoFromEnv = exports.checkBranchEventEnv = exports.branchEvent = void 0;
 const decoders_1 = __nccwpck_require__(8186);
 const promises_1 = __nccwpck_require__(3292);
 exports.branchEvent = (0, decoders_1.object)({
@@ -19,7 +19,7 @@ exports.branchEvent = (0, decoders_1.object)({
         }),
     }),
 });
-/** Returns push or workflow_dispatch event values gathered from CI environment variables */
+/** Returns push event values gathered from CI environment variables */
 const checkBranchEventEnv = async () => {
     const eventPath = process.env.GITHUB_EVENT_PATH;
     if (!eventPath) {
@@ -34,11 +34,24 @@ const checkBranchEventEnv = async () => {
     return exports.branchEvent.verify(value);
 };
 exports.checkBranchEventEnv = checkBranchEventEnv;
+/**
+ * Returns the repo from GITHUB_REPOSITORY ("owner/repo").
+ * Scheduled and manual runs use this: a schedule event's payload doesn't name the repo.
+ */
+const repoFromEnv = () => {
+    var _a;
+    const [owner, repo] = ((_a = process.env.GITHUB_REPOSITORY) !== null && _a !== void 0 ? _a : '').split('/');
+    if (!owner || !repo) {
+        throw new Error('Expected GITHUB_REPOSITORY like "owner/repo"');
+    }
+    return { owner, repo };
+};
+exports.repoFromEnv = repoFromEnv;
 
 
 /***/ }),
 
-/***/ 3109:
+/***/ 5056:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
 "use strict";
@@ -80,6 +93,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.run = run;
 const core = __importStar(__nccwpck_require__(2186));
 const action_1 = __nccwpck_require__(1231);
 const auth_token_1 = __nccwpck_require__(334);
@@ -164,6 +178,28 @@ const merge = async ({ owner, repo, actionsOctokit }, { base, head }) => {
     // Unless we receive an undocumented 2xx return code, this code is unreachable.
     core.error(`Unknown return status (${status}). Assuming we don't need to kick CI.`);
     return false;
+};
+/** Lists the names of every branch in the repo, one page of 100 at a time. */
+const listBranchNames = async ({ owner, repo, actionsOctokit, }) => {
+    const perPage = 100;
+    const names = [];
+    for (let page = 1;; page++) {
+        const { data } = await actionsOctokit.repos.listBranches({ owner, repo, per_page: perPage, page });
+        names.push(...data.map(b => b.name));
+        if (data.length < perPage) {
+            return names;
+        }
+    }
+};
+/** True if `head` has commits that `base` doesn't. */
+const hasNewCommits = async ({ owner, repo, actionsOctokit }, { base, head }) => {
+    const { data } = await actionsOctokit.repos.compareCommitsWithBasehead({
+        owner,
+        repo,
+        basehead: `${base}...${head}`,
+        per_page: 1,
+    });
+    return data.ahead_by > 0;
 };
 /**
  * Given a list of notes, constructs a comment containing a list of those notes.
@@ -319,6 +355,25 @@ targetBranch) => {
     const head = useIntermediateBranch
         ? `merge/${pushedBranch.replace(/\//g, '-')}_to_${targetBranch.replace(/\//g, '-')}`
         : pushedBranch;
+    // List existing pulls from the given source to the desired target branch
+    const { data: pulls } = await actionsOctokit.pulls.list({
+        owner,
+        repo,
+        base: targetBranch,
+        head,
+        state: 'open',
+    });
+    const existingPRs = pulls.filter(p => p.head.ref === head && p.base.ref === targetBranch);
+    if (existingPRs.length > 1) {
+        core.warning(`Found multiple PRs from ${head} to ${targetBranch}. That's impossible... Merging the first one.`);
+    }
+    const existingPR = existingPRs[0];
+    // With no sync PR open and nothing new on the source, a sync would open an empty PR (or fail to open one).
+    // A push always brings new commits, but a scheduled or manual run often doesn't.
+    if (existingPR === undefined && !(await hasNewCommits(ctx, { base: targetBranch, head: pushedBranch }))) {
+        core.info(`${pushedBranch} has nothing new for ${targetBranch}. Skipping.`);
+        return null;
+    }
     // Track encountered merge conflicts
     const conflicts = { sourceConflict: false, targetConflict: false };
     // true if we need to close+reopen the PR to start CI, otherwise false
@@ -346,19 +401,6 @@ targetBranch) => {
             conflicts.targetConflict = true;
         }
     }
-    // List existing pulls from the given source to the desired target branch
-    const { data: pulls } = await actionsOctokit.pulls.list({
-        owner,
-        repo,
-        base: targetBranch,
-        head,
-        state: 'open',
-    });
-    const existingPRs = pulls.filter(p => p.head.ref === head && p.base.ref === targetBranch);
-    if (existingPRs.length > 1) {
-        core.warning(`Found multiple PRs from ${head} to ${targetBranch}. That's impossible... Merging the first one.`);
-    }
-    const existingPR = existingPRs[0];
     if (existingPR !== undefined) {
         core.info(`A PR from ${head} to ${targetBranch} already exists.`);
         await reportConflicts(ctx, existingPR, {
@@ -476,20 +518,38 @@ sourceBranch) => {
     core.debug('Skipping close+reopen.');
     return null; // PR existed, didn't update it, didn't kick it, didn't change it
 };
+/**
+ * Events that sync every source branch, whatever branch the workflow runs on.
+ * A schedule runs on the default branch, so its ref says nothing about what to sync.
+ */
+const syncEverySourceEvents = ['schedule', 'workflow_dispatch'];
+const supportedEvents = ['push', ...syncEverySourceEvents];
 /** Creates/Updates sync PRs according to provided branch patterns */
 async function updateSyncPRs(actionsOctokit) {
-    const { ref, repository: { name: repo, owner: { login: owner }, }, } = await (0, github_events_1.checkBranchEventEnv)();
-    const pushedBranch = refAsBranch(ref);
-    if ((0, lodash_1.isNil)(pushedBranch)) {
-        throw new Error(`Unable to determine head branch. ref was ${ref}. Did you forget to limit the workflow to only branches?`);
+    var _a;
+    const eventName = (_a = process.env.GITHUB_EVENT_NAME) !== null && _a !== void 0 ? _a : '';
+    // On a push, the branch that was pushed to. Unused on a scheduled or manual run.
+    let pushedBranch = null;
+    let owner;
+    let repo;
+    if (eventName === 'push') {
+        const event = await (0, github_events_1.checkBranchEventEnv)();
+        owner = event.repository.owner.login;
+        repo = event.repository.name;
+        pushedBranch = refAsBranch(event.ref);
+        if ((0, lodash_1.isNil)(pushedBranch)) {
+            throw new Error(`Unable to determine head branch. ref was ${event.ref}. Did you forget to limit the workflow to only branches?`);
+        }
+    }
+    else {
+        ({ owner, repo } = (0, github_events_1.repoFromEnv)());
     }
     const prToken = core.getInput('PR_CREATE_TOKEN');
     // Octokit based by a PAT, if provided, otherwise the default GITHUB_TOKEN octokit
     const prOctokit = await (prToken !== '' ? mkOctokitFromPAT(prToken) : actionsOctokit);
-    const ctx = {
+    const baseCtx = {
         owner,
         repo,
-        pushedBranch,
         sourceBranchPattern: core.getInput('source_pattern', { required: true }),
         targetBranchPattern: core.getInput('target_pattern', { required: true }),
         useIntermediateBranch: core.getBooleanInput('use_intermediate_branch', { required: true }),
@@ -500,45 +560,54 @@ async function updateSyncPRs(actionsOctokit) {
         actionsOctokit,
         prOctokit,
     };
-    const { data: branches } = await actionsOctokit.repos.listBranches({ owner, repo });
+    const ctxFor = (branch) => ({ ...baseCtx, pushedBranch: branch });
+    const branches = await listBranchNames(baseCtx);
+    const sources = branches.filter(b => (0, minimatch_1.minimatch)(b, baseCtx.sourceBranchPattern));
+    const targets = branches.filter(b => (0, minimatch_1.minimatch)(b, baseCtx.targetBranchPattern));
     const syncedPRs = [];
-    // If this action was triggered by a push to a SOURCE branch...
-    if ((0, minimatch_1.minimatch)(pushedBranch, ctx.sourceBranchPattern) === true) {
-        core.debug(`Matched source pattern: ${JSON.stringify({ pushedBranch, sourceBranchPattern: ctx.sourceBranchPattern })}`);
-        const targets = branches.map(b => b.name).filter(b => (0, minimatch_1.minimatch)(b, ctx.targetBranchPattern));
-        core.debug(`Will open/update sync PRs targeting: ${targets}`);
-        for (const targetBranch of targets) {
-            try {
-                const update = await handlePushToSourceBranch(ctx, targetBranch);
-                if (update) {
-                    syncedPRs.push(update);
-                }
+    /** Runs one sync. A failure fails the action but doesn't stop the other syncs. */
+    const trySync = async (sync) => {
+        try {
+            const update = await sync();
+            if (update) {
+                syncedPRs.push(update);
             }
-            catch (err) {
-                if (err instanceof request_error_1.RequestError) {
-                    core.error(`status: ${err.status}`);
+        }
+        catch (err) {
+            if (err instanceof request_error_1.RequestError) {
+                core.error(`status: ${err.status}`);
+            }
+            core.setFailed(err instanceof Error ? err : `${err}`);
+        }
+    };
+    if (pushedBranch === null) {
+        // A scheduled or manual run: sync every source to every target. Each sync merges both the source and the
+        // target into the intermediate branch, so it catches up with whichever side moved.
+        core.info(`Syncing ${sources.join(', ') || 'no branches'} => ${targets.join(', ') || 'no branches'}`);
+        for (const sourceBranch of sources) {
+            for (const targetBranch of targets) {
+                if (sourceBranch !== targetBranch) {
+                    await trySync(async () => handlePushToSourceBranch(ctxFor(sourceBranch), targetBranch));
                 }
-                core.setFailed(err instanceof Error ? err : `${err}`);
             }
         }
     }
-    // If this action was triggered by a push to a TARGET branch...
-    if ((0, minimatch_1.minimatch)(pushedBranch, ctx.targetBranchPattern) === true) {
-        core.debug(`Matched target pattern: ${JSON.stringify({ pushedBranch, targetBranchPattern: ctx.targetBranchPattern })}`);
-        const sources = branches.map(b => b.name).filter(b => (0, minimatch_1.minimatch)(b, ctx.sourceBranchPattern));
-        core.debug(`Will update sync PRs with sources: ${sources}`);
-        for (const sourceBranch of sources) {
-            try {
-                const update = await handlePushToTargetBranch(ctx, sourceBranch);
-                if (update) {
-                    syncedPRs.push(update);
-                }
+    else {
+        const ctx = ctxFor(pushedBranch);
+        // If this action was triggered by a push to a SOURCE branch...
+        if ((0, minimatch_1.minimatch)(pushedBranch, ctx.sourceBranchPattern) === true) {
+            core.debug(`Matched source pattern: ${JSON.stringify({ pushedBranch, sourceBranchPattern: ctx.sourceBranchPattern })}`);
+            core.debug(`Will open/update sync PRs targeting: ${targets}`);
+            for (const targetBranch of targets) {
+                await trySync(async () => handlePushToSourceBranch(ctx, targetBranch));
             }
-            catch (err) {
-                if (err instanceof request_error_1.RequestError) {
-                    core.error(`status: ${err.status}`);
-                }
-                core.setFailed(err instanceof Error ? err : `${err}`);
+        }
+        // If this action was triggered by a push to a TARGET branch...
+        if ((0, minimatch_1.minimatch)(pushedBranch, ctx.targetBranchPattern) === true) {
+            core.debug(`Matched target pattern: ${JSON.stringify({ pushedBranch, targetBranchPattern: ctx.targetBranchPattern })}`);
+            core.debug(`Will update sync PRs with sources: ${sources}`);
+            for (const sourceBranch of sources) {
+                await trySync(async () => handlePushToTargetBranch(ctx, sourceBranch));
             }
         }
     }
@@ -546,20 +615,18 @@ async function updateSyncPRs(actionsOctokit) {
     core.info('Done');
 }
 /**
- * Events whose `ref` names the branch to sync.
- * workflow_dispatch lets a schedule or a person sync a branch without pushing to it.
+ * Runs the action. `newOctokit` builds the GITHUB_TOKEN client; tests pass a fake.
  */
-const supportedEvents = ['push', 'workflow_dispatch'];
-async function run() {
+async function run(newOctokit = () => new action_1.Octokit()) {
     var _a;
     if (!supportedEvents.includes((_a = process.env.GITHUB_EVENT_NAME) !== null && _a !== void 0 ? _a : '')) {
-        core.setFailed(`sync-branches only works on "push" and "workflow_dispatch" events`);
+        core.setFailed(`sync-branches only works on "push", "schedule" and "workflow_dispatch" events`);
         return;
     }
     try {
         // If unset, will throw.
         core.getInput('GITHUB_TOKEN', { required: true });
-        const actionsOctokit = new action_1.Octokit();
+        const actionsOctokit = newOctokit();
         await updateSyncPRs(actionsOctokit);
     }
     catch (err) {
@@ -569,7 +636,6 @@ async function run() {
         core.setFailed(err instanceof Error ? err : `${err}`);
     }
 }
-run();
 
 
 /***/ }),
@@ -33725,13 +33791,19 @@ module.exports = JSON.parse('[[[0,44],"disallowed_STD3_valid"],[[45,46],"valid"]
 /******/ 	if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = __dirname + "/";
 /******/ 	
 /************************************************************************/
-/******/ 	
-/******/ 	// startup
-/******/ 	// Load entry module and return exports
-/******/ 	// This entry module is referenced by other modules so it can't be inlined
-/******/ 	var __webpack_exports__ = __nccwpck_require__(3109);
-/******/ 	module.exports = __webpack_exports__;
-/******/ 	
+var __webpack_exports__ = {};
+// This entry need to be wrapped in an IIFE because it need to be in strict mode.
+(() => {
+"use strict";
+var exports = __webpack_exports__;
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+const sync_1 = __nccwpck_require__(5056);
+(0, sync_1.run)();
+
+})();
+
+module.exports = __webpack_exports__;
 /******/ })()
 ;
 //# sourceMappingURL=index.js.map
